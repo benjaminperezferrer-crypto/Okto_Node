@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- CSP: módulo local file://; connect-src 'none' = cero egreso de datos. Ver index.html para el razonamiento completo. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob: data:; worker-src 'self' blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'self'; form-action 'none'">
+  <title>Okto Node — Análisis Estructural</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body { background: #f8fafc; color: #0f172a; font-family: system-ui, sans-serif; }
+    #root { min-height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="root">Cargando módulo Análisis Estructural…</div>
+  <script src="./bundle.js"></script>
+</body>
+</html>

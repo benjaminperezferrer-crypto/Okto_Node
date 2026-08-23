@@ -1,0 +1,36 @@
+/**
+ * src/shared/collapsibleSection.css
+ * CSS de CollapsibleSection.tsx (React) Y de CollapsibleSectionVanilla
+ * (collapsibleSectionVanilla.js, para módulos sin build como Columnas) —
+ * archivo real, no un string embebido, para que AMBAS implementaciones lo
+ * consuman desde una única fuente sin riesgo de que diverjan visualmente
+ * con el tiempo. Mismo patrón dual que hudTheme.css: los módulos con
+ * build lo importan vía `import ... from '.../collapsibleSection.css'`
+ * (loader `text` de esbuild, ver css.d.ts), los módulos sin build lo
+ * enlazan directo con `<link rel="stylesheet">`.
+ *
+ * Mismo padding/tamaño de fuente que `.hgm-section`/`.hgm-sec-label`
+ * (HydrogeochemistryModule.tsx) para que una sección plegable y una
+ * `Section` fija de siempre se vean del mismo "peso" visual — la
+ * diferencia es que acá el label ES el botón (cursor pointer, hover
+ * resalta a cian) y tiene una flecha (▸/▾) que indica el estado. Reusa
+ * únicamente las variables `--hud-*` de hudTheme.css (ya global en
+ * `:root` de cualquier documento que la use), no clases con nombres
+ * heredados de ningún módulo.
+ */
+.cs-section { border-bottom: 1px solid var(--hud-border-dim); }
+.cs-header {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 13px; background: none; border: none; cursor: pointer;
+  font-family: inherit; text-align: left;
+}
+.cs-caret {
+  font-size: .6rem; color: var(--hud-text-muted); width: 10px; flex-shrink: 0;
+  transition: color .15s;
+}
+.cs-title {
+  font-size: .62rem; font-weight: 700; text-transform: uppercase; letter-spacing: .12em;
+  color: var(--hud-text-muted); transition: color .15s;
+}
+.cs-header:hover .cs-caret, .cs-header:hover .cs-title { color: var(--hud-cyan); }
+.cs-body { padding: 0 13px 13px; }

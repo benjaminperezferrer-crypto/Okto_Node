@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- CSP: módulo local file://; connect-src 'none' = cero egreso de datos. Ver index.html para el razonamiento completo. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob: data:; worker-src 'self' blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'self'; form-action 'none'">
+  <title>Okto Node — Hidrogeoquímica</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body { background: #010F20; color: #e2e8f0; font-family: 'Courier New', Courier, monospace; }
+    #root { height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="root">Cargando módulo de hidrogeoquímica…</div>
+  <script src="./bundle.js"></script>
+</body>
+</html>

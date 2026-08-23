@@ -1,0 +1,4032 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- CSP: módulo local file://; connect-src 'none' = cero egreso de datos. Ver index.html para el razonamiento completo. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob: data:; worker-src 'self' blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'self'; form-action 'none'">
+  <title>Okto Node — Columnas Estratigráficas</title>
+  <script src="./store.js"></script>
+  <script src="./geo-symbols.js"></script>
+  <script src="./chronostrat.js"></script>
+  <script src="./renderer.js"></script>
+  <script src="./renderer-gslog.js"></script>
+  <!-- Divulgación progresiva (secciones plegables del editor de unidad) —
+       mismo patrón ya validado en Hidrogeoquímica/Análisis Estructural,
+       reimplementado en JS vanilla porque este módulo no tiene pipeline
+       de build (sin JSX). CSS real compartido con CollapsibleSection.tsx
+       (src/shared/collapsibleSection.css, NO un string duplicado) y
+       persistencia en la MISMA key/mapa que collapsibleState.ts — ver
+       JSDoc de collapsibleSectionVanilla.js. -->
+  <link rel="stylesheet" href="../shared/collapsibleSection.css">
+  <script src="../shared/collapsibleSectionVanilla.js"></script>
+  <!-- Tema HUD — src/shared/hudTheme.css (Etapa 17: única fuente de verdad,
+       reemplaza el bloque :root que antes vivía acá con valores duplicados
+       de HGM_CSS/index.html/GIS_CSS, ver JSDoc de ese archivo). Define
+       --bg/--cyan/--text/etc. en :root vía alias a --hud-*, así que todo
+       el resto de este archivo (que ya los consume) sigue funcionando sin
+       cambios. --panel-pad/--lbl son propios de Columnas, no del tema
+       compartido — se quedan acá. -->
+  <link rel="stylesheet" href="../shared/hudTheme.css">
+  <style>
+    /* ── Variables propias de Columnas (no compartidas) ────────────── */
+    :root {
+      --panel-pad:  13px;
+      --lbl:        0.62rem;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Courier New', Courier, monospace;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      font-size: 13px;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────── */
+    #header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 9px 18px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+    }
+    .hdr-title  { font-size: 0.9rem; font-weight: 700; letter-spacing: .12em; color: var(--cyan); }
+    .hdr-sub    { font-size: 0.68rem; color: var(--text-dim); margin-top: 1px; }
+    .hdr-badge  { margin-left: auto; font-size: 0.65rem; color: var(--text-muted);
+                  border: 1px solid var(--border-dim); padding: 2px 8px; letter-spacing: .08em; }
+
+    /* ── Body grid ──────────────────────────────────────────────── */
+    #body {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 244px 1fr 440px;
+      overflow: hidden;
+    }
+
+    /* ── Column SVG viewport ────────────────────────────────────── */
+    #col-view {
+      position: relative;
+      overflow: auto;
+      padding: 24px 28px;
+      background: var(--bg);
+      border-left: 1px solid var(--border-dim);
+      border-right: 1px solid var(--border-dim);
+    }
+    #col-view svg { display: block; }
+    #col-view.zoom-tool-active svg { cursor: zoom-in; }
+    #btn-zoom-tool.active { border-color: var(--cyan); background: var(--cyan-dim); color: var(--cyan); }
+
+    /* ── Leyenda: entradas editables ────────────────────────────── */
+    #col-view svg g[data-legend-kind] { cursor: text; }
+    #col-view svg g[data-legend-kind]:hover text { fill: #0891b2 !important; }
+    .legend-edit-input {
+      position: absolute;
+      z-index: 30;
+      font-family: monospace;
+      font-size: 10.5px;
+      line-height: 13px;
+      height: 13px;
+      padding: 1px 3px;
+      border: 1px solid var(--cyan);
+      border-radius: 2px;
+      background: #ffffff;
+      color: #1e293b;
+      outline: none;
+    }
+
+    /* ── Shared panel base ──────────────────────────────────────── */
+    .panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg2);
+    }
+    .panel + .panel { border-left: 1px solid var(--border); }
+
+    .panel-section {
+      padding: var(--panel-pad);
+      border-bottom: 1px solid var(--border-dim);
+      flex-shrink: 0;
+    }
+
+    .sec-label {
+      font-size: var(--lbl);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    /* ── Inputs & selects ───────────────────────────────────────── */
+    .f-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
+    .f-row:last-child { margin-bottom: 0; }
+    .f-lbl { font-size: 0.65rem; color: var(--text-dim); white-space: nowrap; min-width: 44px; }
+
+    input[type=text], input[type=number], select, textarea {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.75rem;
+      padding: 4px 7px;
+      outline: none;
+      width: 100%;
+    }
+    input[type=text]:focus, input[type=number]:focus,
+    select:focus, textarea:focus {
+      border-color: var(--cyan);
+      box-shadow: var(--cyan-glow);
+    }
+    select option { background: #0d1e36; }
+    textarea { resize: vertical; min-height: 56px; line-height: 1.4; }
+
+    /* ── LIST PANEL ─────────────────────────────────────────────── */
+    #list-units { flex: 1; overflow-y: auto; padding: 4px 0; }
+
+    .unit-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px var(--panel-pad);
+      border-bottom: 1px solid var(--border-dim);
+      cursor: pointer;
+      transition: background .12s;
+      user-select: none;
+    }
+    .unit-row:hover    { background: rgba(0,244,255,0.04); }
+    .unit-row.active   { background: var(--cyan-dim); border-left: 2px solid var(--cyan); padding-left: calc(var(--panel-pad) - 2px); }
+    .unit-row.dragging { opacity: .35; }
+    .unit-row.drag-over{ border-top: 2px solid var(--cyan); }
+
+    .drag-handle {
+      cursor: grab;
+      color: var(--text-muted);
+      font-size: 14px;
+      flex-shrink: 0;
+      padding: 0 2px;
+      line-height: 1;
+    }
+    .drag-handle:active { cursor: grabbing; }
+
+    .unit-swatch {
+      width: 9px; height: 28px;
+      border: 1px solid rgba(255,255,255,0.15);
+      flex-shrink: 0;
+      border-radius: 1px;
+    }
+
+    .unit-info { flex: 1; min-width: 0; }
+    .unit-code { font-weight: 700; font-size: 0.82rem; color: var(--text); }
+    .unit-meta { font-size: 0.65rem; color: var(--text-dim);
+                 overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+    .contact-pip {
+      width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+    }
+    .pip-neto        { background: #94a3b8; }
+    .pip-gradual     { background: #6b90b8; }
+    .pip-erosivo     { background: #f59e0b; }
+    .pip-tectonico   { background: #ef4444; }
+    .pip-no_expuesto { background: #4a5568; border: 1px solid #94a3b8; }
+
+    .row-btn {
+      width: 20px; height: 20px;
+      border: 1px solid var(--border);
+      background: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 10px;
+      border-radius: 2px;
+      display: flex; align-items: center; justify-content: center;
+      font-family: inherit; flex-shrink: 0;
+      transition: all .12s;
+    }
+    .row-btn:hover { background: rgba(239,68,68,0.12); border-color: var(--red); color: var(--red); }
+    .row-btn.edit:hover { background: var(--cyan-dim); border-color: var(--cyan); color: var(--cyan); }
+
+    #list-footer {
+      flex-shrink: 0;
+      padding: var(--panel-pad);
+      border-top: 1px solid var(--border-dim);
+    }
+    .btn-new {
+      width: 100%; padding: 7px;
+      border: 1px solid var(--border);
+      background: var(--bg3); color: var(--cyan);
+      font-family: inherit; font-size: 0.75rem; font-weight: 700;
+      letter-spacing: .06em; cursor: pointer;
+      transition: all .15s;
+    }
+    .btn-new:hover { background: var(--cyan-dim); border-color: var(--cyan); box-shadow: var(--cyan-glow); }
+
+    /* ── EDIT PANEL ─────────────────────────────────────────────── */
+    #edit-panel { border-left: 1px solid var(--border); }
+
+    #edit-placeholder {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: var(--text-muted); gap: 10px; text-align: center; padding: 24px;
+    }
+    #edit-placeholder .ph-icon { font-size: 2rem; opacity: .3; }
+    #edit-placeholder .ph-text { font-size: 0.72rem; line-height: 1.5; }
+
+    #edit-form { display: none; flex-direction: column; overflow: hidden; flex: 1; }
+    #edit-form.visible { display: flex; }
+
+    #edit-hdr {
+      flex-shrink: 0;
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px var(--panel-pad);
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+    }
+    #edit-hdr-title { font-size: 0.8rem; font-weight: 700; color: var(--cyan); flex: 1; }
+    .btn-close {
+      width: 22px; height: 22px;
+      border: 1px solid var(--border); background: none; color: var(--text-dim);
+      cursor: pointer; font-size: 12px; border-radius: 2px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .btn-close:hover { border-color: var(--red); color: var(--red); }
+
+    #edit-body { flex: 1; overflow-y: auto; }
+
+    /* Collapsible sections */
+    .edit-sec { border-bottom: 1px solid var(--border-dim); }
+    .edit-sec-toggle {
+      width: 100%; display: flex; align-items: center; justify-content: space-between;
+      padding: 8px var(--panel-pad);
+      background: none; border: none; color: var(--text-dim);
+      font-family: inherit; font-size: var(--lbl); font-weight: 700;
+      text-transform: uppercase; letter-spacing: .12em;
+      cursor: pointer; transition: color .12s;
+    }
+    .edit-sec-toggle:hover { color: var(--cyan); }
+    /* sec-basico (Etapa Columnas de divulgación progresiva) — esencial, ya
+       no es un botón interactivo, así que no debe insinuar que lo es. */
+    .edit-sec-toggle.static:hover { color: var(--text); }
+    .edit-sec.open .edit-sec-toggle { color: var(--text); }
+    .edit-sec-body { display: none; padding: var(--panel-pad); padding-top: 4px; }
+    .edit-sec.open .edit-sec-body { display: block; }
+
+    /* Field group */
+    .fg { margin-bottom: 10px; }
+    .fg:last-child { margin-bottom: 0; }
+    .fg-lbl { font-size: var(--lbl); color: var(--text-muted); margin-bottom: 4px;
+               text-transform: uppercase; letter-spacing: .08em; }
+
+    /* Chip groups */
+    .chip-group { display: flex; flex-wrap: wrap; gap: 4px; }
+    .chip-cat-lbl { width: 100%; font-size: 9.5px; font-weight: 600; letter-spacing: .06em; color: #64748b; text-transform: uppercase; margin: 4px 0 1px; }
+
+    /* Collapsible chip groups */
+    .cg-block { width: 100%; }
+    .cg-toggle { cursor: pointer; user-select: none; display: flex !important; justify-content: space-between; align-items: center; padding: 3px 4px; border-radius: 2px; margin: 3px 0 2px !important; }
+    .cg-toggle:hover { background: var(--bg3); color: var(--cyan); }
+    .cg-arr { font-size: 8px; transition: transform .15s; flex-shrink: 0; }
+    .cg-body { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 2px; }
+    .cg-block.collapsed .cg-arr { transform: rotate(-90deg); }
+    .cg-block.collapsed .cg-body { display: none; }
+
+    /* Filter inputs */
+    .chip-filter { width: 100%; box-sizing: border-box; padding: 4px 8px; margin-bottom: 5px; font-size: 0.68rem; font-family: inherit; background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 3px; }
+    .chip-filter:focus { border-color: var(--cyan); outline: none; }
+    .chip-filter::placeholder { color: var(--text-muted); }
+
+    /* ── Litho autocomplete dropdown ────────────────────────────── */
+    #litho-suggestions {
+      position: absolute; z-index: 200;
+      background: var(--bg3); border: 1px solid var(--cyan);
+      border-radius: 4px; max-height: 200px; overflow-y: auto;
+      box-shadow: 0 4px 16px rgba(0,0,0,.45);
+      display: none;
+    }
+    .litho-opt {
+      padding: 5px 10px; font-size: 0.68rem; font-family: inherit;
+      cursor: pointer; color: var(--text); white-space: nowrap;
+    }
+    .litho-opt:hover, .litho-opt.focused { background: var(--cyan-dim); color: var(--cyan); }
+    .litho-opt.group-hdr { color: var(--text-muted); font-size: 0.6rem; letter-spacing: .06em;
+                            padding: 6px 10px 2px; pointer-events: none; text-transform: uppercase; }
+    .chip {
+      padding: 3px 8px; border: 1px solid var(--border);
+      background: var(--bg3); color: var(--text-dim);
+      font-size: 0.68rem; cursor: pointer; border-radius: 2px;
+      font-family: inherit; transition: all .12s; white-space: nowrap;
+    }
+    .chip:hover   { border-color: rgba(0,244,255,0.4); color: var(--text); }
+    .chip.on      { border-color: var(--cyan); background: var(--cyan-dim); color: var(--cyan); }
+    .chip.on.neto      { border-color: #94a3b8; background: rgba(148,163,184,.12); color: #94a3b8; }
+    .chip.on.gradual   { border-color: #6b90b8; background: rgba(107,144,184,.12); color: #6b90b8; }
+    .chip.on.erosivo   { border-color: var(--orange); background: rgba(245,158,11,.12); color: var(--orange); }
+    .chip.on.tectonico { border-color: var(--red);    background: rgba(239,68,68,.12);  color: var(--red); }
+    .chip.on.no_expuesto { border-color: #64748b; background: rgba(100,116,139,.12); color: #64748b; }
+
+    /* Rango granulométrico (control de primer nivel, junto a Tamaño de grano) */
+    .grad-row { display: flex; align-items: center; gap: 5px; margin-top: 4px; flex-wrap: wrap; }
+    .grad-lbl { font-size: 0.6rem; color: var(--text-muted); white-space: nowrap; }
+    .grad-sel { font-size: 0.62rem; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 2px 4px; border-radius: 2px; flex: 1; min-width: 80px; }
+    .grad-arrow { font-size: 0.75rem; color: var(--text-muted); }
+    .grad-clear { font-size: 0.6rem; background: none; border: 1px solid var(--border); color: var(--text-dim); padding: 2px 7px; border-radius: 2px; cursor: pointer; white-space: nowrap; }
+    .grad-clear:hover { color: var(--text); border-color: var(--text-dim); }
+    .grad-hint { font-size: 0.58rem; color: var(--text-muted); margin-top: 3px; }
+
+    /* Struct position list */
+    #struct-pos-list { margin-top: 6px; }
+    #struct-data-list { margin-top: 4px; }
+    .cs-row { display: flex; align-items: center; gap: 6px; }
+    .cs-swatch { width: 20px; height: 20px; border-radius: 3px; border: 1px solid rgba(0,0,0,.12); flex-shrink: 0; transition: background .15s; }
+    .cs-sel { flex: 1; min-width: 0; }
+    .btn-ics-apply { width: 100%; padding: 5px 8px; border: none; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 0.7rem; font-weight: 600; letter-spacing: .03em; transition: filter .15s; }
+    .btn-ics-apply:hover { filter: brightness(1.1); }
+    .sd-row { display: flex; align-items: center; gap: 4px; margin-bottom: 5px; flex-wrap: wrap; }
+    .sd-sel { font-size: 0.62rem; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 1px 3px; border-radius: 2px; flex: 1; min-width: 72px; }
+    .btn-sm-add { background: none; border: 1px solid var(--border); color: var(--text-dim); font-family: inherit; font-size: 0.62rem; padding: 2px 7px; border-radius: 2px; cursor: pointer; }
+    .btn-sm-add:hover { border-color: var(--cyan); color: var(--cyan); }
+    .sp-del-btn { background: none; border: none; color: var(--text-muted); font-family: inherit; font-size: 10px; cursor: pointer; padding: 1px 3px; line-height: 1; }
+    .sp-del-btn:hover { color: #ef4444; }
+    .sp-add-btn { background: none; border: none; color: var(--text-muted); font-family: inherit; font-size: 10px; cursor: pointer; padding: 1px 3px; line-height: 1; }
+    .sp-add-btn:hover { color: var(--cyan); }
+    .sp-row { margin-bottom: 7px; }
+    .sp-row-name { font-size: 0.63rem; color: var(--text-dim); margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
+    .sp-row-name-txt { overflow: hidden; text-overflow: ellipsis; }
+    .sp-controls { display: flex; gap: 5px; }
+    .sp-ctrl { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    .sp-ctrl-label { font-size: 0.55rem; color: var(--text-muted); letter-spacing: 0.04em; }
+    .sp-input { width: 44px; font-size: 0.63rem; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 2px; padding: 1px 3px; text-align: center; }
+
+    /* Secondary lithologies list */
+    .sec-litho-tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 5px; }
+    .sec-litho-tag {
+      display: flex; align-items: center; gap: 4px;
+      padding: 2px 6px; background: var(--bg); border: 1px solid var(--border);
+      font-size: 0.65rem; color: var(--text-dim); border-radius: 2px;
+    }
+    .sec-litho-tag button {
+      background: none; border: none; color: var(--text-muted);
+      cursor: pointer; padding: 0; font-size: 10px; line-height: 1;
+    }
+    .sec-litho-tag button:hover { color: var(--red); }
+
+    /* Munsell row */
+    .munsell-row { display: flex; gap: 4px; align-items: center; }
+    .munsell-row input { text-align: center; }
+    .munsell-sep { color: var(--text-muted); flex-shrink: 0; }
+
+    /* ── Edit tabs ──────────────────────────────────────────────── */
+    #edit-tabs {
+      flex-shrink: 0;
+      display: flex;
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 8px 4px;
+      border: none; border-bottom: 2px solid transparent;
+      background: none; color: var(--text-muted);
+      font-family: inherit; font-size: 0.6rem;
+      letter-spacing: .05em; text-transform: uppercase;
+      cursor: pointer; transition: all .15s;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .tab-btn:hover { color: var(--text); background: rgba(0,244,255,.04); }
+    .tab-btn.active { color: var(--cyan); border-bottom-color: var(--cyan); background: rgba(0,244,255,.06); }
+
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* ── Project tab bar ────────────────────────────────────────── */
+    #proj-tabs-bar {
+      flex-shrink: 0;
+      display: flex;
+      align-items: flex-end;
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--cyan) transparent;
+    }
+    #proj-tabs-bar::-webkit-scrollbar { height: 3px; }
+    #proj-tabs-bar::-webkit-scrollbar-thumb { background: var(--cyan); border-radius: 2px; }
+    #proj-tabs { display: flex; align-items: flex-end; flex: 1; gap: 2px; padding: 0 6px; min-width: 0; }
+    .proj-tab {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px 7px;
+      font-size: 0.62rem;
+      font-family: inherit;
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+      cursor: pointer;
+      background: transparent;
+      border: 1px solid rgba(0,244,255,.10);
+      border-bottom: none;
+      color: var(--text-muted);
+      transition: all .15s;
+      position: relative;
+      bottom: -1px;
+      max-width: 180px;
+      user-select: none;
+    }
+    .proj-tab:hover { color: var(--text); background: rgba(0,244,255,.05); }
+    .proj-tab.active {
+      color: var(--cyan);
+      background: var(--bg2);
+      border-color: var(--cyan);
+      box-shadow: 0 -2px 6px rgba(0,244,255,.12);
+    }
+    .proj-tab-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+    .proj-tab-close {
+      flex-shrink: 0;
+      width: 14px;
+      height: 14px;
+      border: none;
+      background: none;
+      color: inherit;
+      font-size: 10px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.4;
+      transition: opacity .15s, color .15s;
+      padding: 0;
+      font-family: inherit;
+    }
+    .proj-tab-close:hover { opacity: 1; color: var(--red); }
+    /* Pestaña FIJA de Correlación — separada visualmente del grupo de
+       columnas (separador a la izquierda), sin ✕, nombre completo. */
+    .proj-tab.fixed-tab {
+      flex-shrink: 0;
+      max-width: none;
+      margin-left: 4px;
+      border-left: 1px solid var(--border-dim);
+    }
+    .proj-tab.fixed-tab .proj-tab-name { flex: none; }
+    .btn-new-proj {
+      flex-shrink: 0;
+      padding: 6px 14px 7px;
+      border: none;
+      border-left: 1px solid var(--border-dim);
+      background: transparent;
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 0.65rem;
+      cursor: pointer;
+      transition: all .15s;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    .btn-new-proj:hover { color: var(--cyan); background: rgba(0,244,255,.06); }
+
+    /* ── Vista de Correlación estratigráfica (pestaña fija) ─────────
+       Ocupa el mismo hueco flexible que #body cuando está activa. Lienzo
+       apaisado: scroll horizontal para muchas columnas lado a lado (aún
+       no implementadas — Etapa 2 es solo el shell). */
+    #correlation-view {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      /* display se controla por JS (none ↔ flex) — ver switchToCorrelation(). */
+      flex-direction: column;
+    }
+    #correlation-canvas {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: flex-start; /* tope: todas las columnas arrancan a la misma altura */
+      gap: 24px;
+      padding: 24px;
+      overflow: auto;
+    }
+    /* Lienzo ÚNICO compartido: un solo <svg> dimensionado a la caja
+       envolvente de TODAS las columnas visibles, con un único <rect> de
+       fondo blanco continuo (barra + etiquetas), sin cortes ni fondo oscuro
+       entre columnas. Cada columna va como un <g> posicionado (x horizontal,
+       y = su desfase de elevación). Ver computeCorrelationLayout() /
+       renderCorrelationCanvas(). Es también la base para las futuras líneas
+       de correlación (se dibujan en este mismo <svg>, coordenadas comunes). */
+    #correlation-canvas svg { flex: 0 0 auto; display: block; background: #fff; }
+    /* Marcadores de puntos conectables (solo visibles con la herramienta Línea). */
+    .corr-marker { fill: var(--cyan); stroke: #0d1e36; stroke-width: 1; cursor: pointer; }
+    .corr-marker:hover { fill: #fff; stroke: var(--cyan); stroke-width: 1.5; }
+    .corr-marker.pending { fill: #f59e0b; stroke: #fff; stroke-width: 1.5; }
+    #correlation-canvas svg [data-corr-line] { cursor: pointer; }
+    /* Grupo de herramientas del lienzo en la barra de escala. */
+    #correlation-scalebar .corr-tool-group {
+      display: inline-flex; gap: 4px; margin-left: 18px; padding-left: 18px;
+      border-left: 1px solid var(--border);
+    }
+    #correlation-scalebar .corr-tool-btn {
+      border: 1px solid var(--border); background: none; color: var(--text-dim);
+      font-family: inherit; font-size: .66rem; letter-spacing: .04em;
+      padding: 3px 9px; cursor: pointer; transition: all .15s;
+    }
+    #correlation-scalebar .corr-tool-btn:hover { color: var(--cyan); border-color: var(--cyan); }
+    #correlation-scalebar .corr-tool-btn.active { color: var(--bg1); background: var(--cyan); border-color: var(--cyan); }
+    #correlation-scalebar .corr-tool-hint { margin-left: 10px; font-size: .66rem; color: var(--cyan-dim); }
+    /* Menú flotante de una línea de correlación (color + eliminar). */
+    #corr-line-menu {
+      position: fixed; z-index: 60;
+      display: flex; flex-direction: column; gap: 7px;
+      background: var(--bg2); border: 1px solid var(--cyan); box-shadow: var(--cyan-glow);
+      padding: 9px; font-size: .7rem; color: var(--text);
+    }
+    #corr-line-menu .corr-line-menu-row { display: flex; align-items: center; gap: 8px; }
+    #corr-line-menu input[type=color] {
+      width: 38px; height: 22px; padding: 0; border: 1px solid var(--border);
+      background: none; cursor: pointer;
+    }
+    #corr-line-menu input[type=range] { flex: 1; min-width: 90px; cursor: pointer; accent-color: var(--cyan); }
+    #corr-line-menu .corr-line-thickness-val {
+      min-width: 30px; text-align: right; color: var(--cyan);
+      font-variant-numeric: tabular-nums; font-size: .68rem;
+    }
+    .corr-line-del-btn {
+      border: 1px solid rgba(239,68,68,0.4); background: none; color: var(--red);
+      font-family: inherit; font-size: .68rem; letter-spacing: .03em;
+      padding: 5px 8px; cursor: pointer; transition: all .15s;
+    }
+    .corr-line-del-btn:hover { background: rgba(239,68,68,0.12); border-color: var(--red); }
+    /* Panel de controles de un cuadro de texto. */
+    #corr-text-menu {
+      position: fixed; z-index: 60;
+      display: flex; flex-direction: column; gap: 7px;
+      background: var(--bg2); border: 1px solid var(--cyan); box-shadow: var(--cyan-glow);
+      padding: 9px; font-size: .7rem; color: var(--text);
+    }
+    #corr-text-menu .ctm-row { display: flex; align-items: center; gap: 6px; }
+    #corr-text-menu .ctm-row > span:first-child { min-width: 52px; color: var(--text-dim); font-size: .66rem; }
+    #corr-text-menu input[type=number] { width: 52px; }
+    #corr-text-menu input[type=color] { width: 38px; height: 22px; padding: 0; border: 1px solid var(--border); background: none; cursor: pointer; }
+    #corr-text-menu input[type=range] { width: 96px; }
+    #corr-text-menu .corr-tool-btn {
+      border: 1px solid var(--border); background: none; color: var(--text-dim);
+      font-family: inherit; font-size: .64rem; padding: 3px 7px; cursor: pointer; transition: all .15s;
+    }
+    #corr-text-menu .corr-tool-btn:hover { color: var(--cyan); border-color: var(--cyan); }
+    /* Aviso transitorio (toast) al eliminar líneas por cambios de selector. */
+    #corr-notice {
+      position: fixed; top: 54px; left: 50%; transform: translateX(-50%); z-index: 200;
+      display: none; max-width: 72%;
+      background: rgba(180,83,9,0.96); border: 1px solid #f59e0b; color: #fff;
+      font-size: .72rem; line-height: 1.35; padding: 8px 14px; border-radius: 3px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.5);
+    }
+    /* Input flotante de edición de contenido. */
+    #corr-text-edit {
+      position: fixed; z-index: 61; width: 180px;
+      background: var(--bg3); border: 1px solid var(--cyan); box-shadow: var(--cyan-glow);
+      color: var(--text); font-family: inherit; font-size: .8rem; padding: 5px 7px; outline: none;
+    }
+
+    /* Barra de escala compartida (patrón "auto salvo sobrescritura"). */
+    #correlation-scalebar {
+      flex-shrink: 0;
+      display: none; /* JS lo muestra (flex) solo cuando hay columnas que graficar */
+      align-items: center;
+      gap: 8px;
+      padding: 8px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+      font-size: .7rem; color: var(--text-dim);
+    }
+    #correlation-scalebar .corr-scale-lbl {
+      text-transform: uppercase; letter-spacing: .1em; font-size: .62rem;
+      color: var(--text-muted);
+    }
+    #correlation-scalebar input {
+      width: 72px; flex: none; text-align: right;
+    }
+    #correlation-scalebar .corr-scale-auto {
+      font-size: .62rem; color: var(--cyan-dim);
+    }
+    #correlation-scalebar .btn-scale-reset {
+      border: 1px solid var(--border); background: none; color: var(--text-dim);
+      font-family: inherit; font-size: .62rem; letter-spacing: .04em;
+      padding: 3px 8px; cursor: pointer; transition: all .15s;
+    }
+    #correlation-scalebar .btn-scale-reset:hover { color: var(--cyan); border-color: var(--cyan); }
+    #correlation-scalebar .btn-scale-reset:disabled { opacity: .35; cursor: default; }
+    #correlation-scalebar .corr-align-toggle {
+      display: flex; align-items: center; gap: 6px; cursor: pointer;
+      margin-left: 18px; padding-left: 18px; border-left: 1px solid var(--border);
+      font-size: .7rem; color: var(--text-dim); white-space: nowrap;
+    }
+    #correlation-scalebar .corr-align-toggle input { width: auto; }
+    .corr-placeholder {
+      margin: auto;
+      text-align: center;
+      max-width: 460px;
+      color: var(--text-muted);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+    .corr-ph-icon { font-size: 2.4rem; color: var(--cyan-dim); letter-spacing: .1em; }
+    .corr-ph-title {
+      font-size: .9rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+      color: var(--cyan);
+    }
+    .corr-ph-sub { font-size: .72rem; line-height: 1.5; color: var(--text-dim); }
+
+    /* ── Fila de selectores de Correlación ─────────────────────────
+       Un slot por columna a comparar. No se envuelve: scroll horizontal
+       propio, alineado con el lienzo apaisado de abajo. */
+    #correlation-selectors {
+      flex-shrink: 0;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+      overflow-x: auto;
+    }
+    .corr-slot {
+      flex: 0 0 auto;
+      width: 180px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .corr-slot-head {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .corr-slot-num {
+      font-size: .6rem; font-weight: 700; letter-spacing: .1em;
+      text-transform: uppercase; color: var(--text-muted);
+    }
+    .corr-slot-del {
+      border: none; background: none; color: var(--text-dim);
+      cursor: pointer; font-size: .75rem; line-height: 1; padding: 2px 4px;
+    }
+    .corr-slot-del:hover { color: var(--red); }
+    .corr-slot.orphan .corr-slot-sel { border-color: var(--red); }
+    .corr-slot-note {
+      font-size: .62rem; line-height: 1.35; color: var(--red);
+      display: flex; align-items: center; gap: 4px;
+    }
+    .btn-add-slot {
+      flex: 0 0 auto;
+      align-self: center;
+      border: 1px dashed var(--border);
+      background: none; color: var(--text-dim);
+      font-family: inherit; font-size: .72rem; letter-spacing: .04em;
+      padding: 8px 12px; cursor: pointer; white-space: nowrap;
+      transition: all .15s;
+    }
+    .btn-add-slot:hover { color: var(--cyan); border-color: var(--cyan); background: rgba(0,244,255,.06); }
+
+    /* Edit footer */
+    #edit-footer {
+      flex-shrink: 0;
+      display: flex; gap: 6px;
+      padding: var(--panel-pad);
+      border-top: 1px solid var(--border);
+      background: var(--bg3);
+    }
+    .btn-save {
+      flex: 1; padding: 7px;
+      border: 1px solid var(--cyan); background: var(--cyan-dim);
+      color: var(--cyan); font-family: inherit; font-size: 0.75rem;
+      font-weight: 700; cursor: pointer; letter-spacing: .06em;
+      transition: all .15s;
+    }
+    .btn-save:hover { background: rgba(0,244,255,.25); box-shadow: var(--cyan-glow); }
+    .btn-cancel {
+      padding: 7px 10px;
+      border: 1px solid var(--border); background: none; color: var(--text-dim);
+      font-family: inherit; font-size: 0.75rem; cursor: pointer; transition: all .15s;
+    }
+    .btn-cancel:hover { border-color: var(--text-dim); color: var(--text); }
+    .btn-delete {
+      padding: 7px 10px;
+      border: 1px solid rgba(239,68,68,0.3); background: none; color: var(--red);
+      font-family: inherit; font-size: 0.75rem; cursor: pointer; transition: all .15s;
+    }
+    .btn-delete:hover { background: rgba(239,68,68,0.1); border-color: var(--red); }
+    .btn-delete:disabled { opacity: .3; cursor: default; }
+
+    /* ── Footer ─────────────────────────────────────────────────── */
+    #footer {
+      flex-shrink: 0;
+      display: flex; gap: 20px; align-items: center;
+      padding: 5px 18px;
+      background: var(--bg2);
+      border-top: 1px solid var(--border-dim);
+      font-size: 0.68rem; color: var(--text-muted);
+    }
+    #footer b { color: var(--text); font-weight: 700; margin-left: 3px; }
+    #val-ind  { margin-left: auto; }
+    .v-ok   { color: var(--green); }
+    .v-warn { color: var(--orange); }
+    .v-err  { color: var(--red); }
+
+    /* ── Confirm modal ──────────────────────────────────────────── */
+    #modal {
+      display: none; position: fixed; inset: 0;
+      background: rgba(1,15,32,.82); backdrop-filter: blur(3px);
+      z-index: 500; align-items: center; justify-content: center;
+    }
+    #modal.open { display: flex; }
+    .modal-box {
+      background: var(--bg3); border: 1px solid var(--border);
+      padding: 24px 28px; max-width: 340px; width: 90%;
+      box-shadow: 0 20px 60px rgba(0,0,0,.7);
+    }
+    .modal-title { font-size: 0.85rem; font-weight: 700; color: var(--red); margin-bottom: 10px; }
+    .modal-body  { font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; margin-bottom: 20px; }
+    .modal-body strong { color: var(--text); }
+    .modal-btns  { display: flex; gap: 8px; justify-content: flex-end; }
+    .modal-btns .btn-cancel { padding: 6px 14px; }
+    .modal-btns .btn-danger {
+      padding: 6px 14px; border: 1px solid var(--red);
+      background: rgba(239,68,68,.1); color: var(--red);
+      font-family: inherit; font-size: 0.75rem; font-weight: 700; cursor: pointer;
+      transition: all .15s;
+    }
+    .modal-btns .btn-danger:hover { background: rgba(239,68,68,.22); }
+
+    /* ── Scrollbar ──────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(0,244,255,0.18); border-radius: 2px; }
+
+    /* ── Export button (header) ────────────────────────────────── */
+    .hdr-export-btn {
+      margin-left: auto; padding: 4px 12px;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--text-dim); font-family: inherit; font-size: 0.65rem;
+      letter-spacing: .08em; cursor: pointer; transition: all .15s;
+    }
+    .hdr-export-btn:hover { border-color: var(--cyan); color: var(--cyan); background: var(--cyan-dim); }
+    .hdr-toggle-btn {
+      padding: 4px 12px;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--text-dim); font-family: inherit; font-size: 0.65rem;
+      letter-spacing: .08em; cursor: pointer; transition: all .15s;
+    }
+    .hdr-toggle-btn:hover { border-color: var(--cyan); color: var(--cyan); background: var(--cyan-dim); }
+    .hdr-toggle-btn.active { border-color: var(--cyan); color: var(--cyan); background: var(--cyan-dim); }
+    .icon-size-btn {
+      padding: 1px 7px; border: 1px solid var(--border); background: transparent;
+      color: var(--text-dim); font-family: inherit; font-size: 0.75rem;
+      cursor: pointer; transition: all .15s; border-radius: 2px;
+    }
+    .icon-size-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+
+    /* ── Export modal ──────────────────────────────────────────── */
+    #export-modal {
+      display: none; position: fixed; inset: 0;
+      background: rgba(1,15,32,.82); backdrop-filter: blur(3px);
+      z-index: 500; align-items: center; justify-content: center;
+    }
+    #export-modal.open { display: flex; }
+    .exp-title { font-size: 0.85rem; font-weight: 700; color: var(--cyan); margin-bottom: 14px; }
+    .exp-formats { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+    .fmt-pill {
+      padding: 5px 14px; border: 1px solid var(--border); background: var(--bg3);
+      color: var(--text-dim); font-family: inherit; font-size: 0.72rem; font-weight: 700;
+      cursor: pointer; letter-spacing: .06em; transition: all .15s;
+    }
+    .fmt-pill.on { border-color: var(--cyan); color: var(--cyan); background: var(--cyan-dim); }
+    .exp-note { font-size: 0.68rem; color: var(--text-muted); margin-top: 10px; line-height: 1.5; min-height: 2.4em; }
+
+    /* ── @media print (PDF via browser) ───────────────────────── */
+    @media print {
+      body > *:not(#print-root) { display: none !important; }
+      #print-root {
+        display: block !important;
+        font-family: 'Courier New', Courier, monospace;
+        color: #1e293b; padding: 28px;
+      }
+      #print-root .pr-title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+      #print-root .pr-row   { font-size: 11px; color: #475569; margin-bottom: 3px; }
+      #print-root .pr-meta  { margin-bottom: 20px; border-bottom: 1px solid #cbd5e1; padding-bottom: 14px; }
+      #print-root .pr-svg   { max-width: 100%; page-break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Project tabs bar ────────────────────────────────────────── -->
+<div id="proj-tabs-bar">
+  <div id="proj-tabs"></div>
+  <button class="btn-new-proj" onclick="newProject()" title="Crear nueva columna estratigráfica">＋ Nueva columna</button>
+</div>
+
+<!-- ── Header ──────────────────────────────────────────────────── -->
+<div id="header">
+  <div>
+    <div class="hdr-title">COLUMNAS ESTRATIGRÁFICAS</div>
+    <div class="hdr-sub" id="hdr-sub">—</div>
+  </div>
+  <button class="hdr-export-btn" onclick="openExportModal()">Exportar ↓</button>
+  <div class="hdr-badge">FGDC/USGS · v0.3</div>
+</div>
+
+<!-- ── Body ────────────────────────────────────────────────────── -->
+<div id="body">
+
+  <!-- Panel 1: Unit list -->
+  <aside class="panel" id="list-panel">
+
+    <!-- Column metadata -->
+    <div class="panel-section">
+      <div class="sec-label">Columna</div>
+      <div class="f-row"><input id="f-col-name"   type="text"   placeholder="Nombre"      oninput="onMeta()"></div>
+      <div class="f-row">
+        <span class="f-lbl">Escala 1:</span>
+        <input id="f-col-scale"  type="number" value="500" min="1" style="width:64px;flex:none" oninput="onMeta()">
+        <span class="f-lbl" style="margin-left:4px">Autor:</span>
+        <input id="f-col-author" type="text"   placeholder="—"  oninput="onMeta()">
+      </div>
+      <div class="f-row">
+        <span class="f-lbl">Cota tope (msnm):</span>
+        <input id="f-col-top-elev" type="number" step="any" placeholder="—" style="width:80px;flex:none" oninput="onMeta()"
+               title="Cota (msnm) del techo de la columna. Opcional — se usa para alinear columnas por elevación real en la pestaña de Correlación estratigráfica.">
+      </div>
+      <!-- Ubicación GIS (Este/Norte + elevación) — coordenadas proyectadas del
+           sitio, para que el módulo GIS pueda ubicar la columna. Se asumen ya en
+           el sistema de referencia del proyecto GIS (mismo criterio que collars).
+           Opcional: sin coordenadas, la columna no aparece en GIS. -->
+      <div class="f-row" style="gap:4px">
+        <span class="f-lbl" title="Coordenada Este (proyectada) del sitio de la columna. Opcional — necesaria para ubicarla en el módulo GIS.">Este:</span>
+        <input id="f-col-este" type="number" step="any" placeholder="—" style="width:76px;flex:none" oninput="onMeta()">
+        <span class="f-lbl" style="margin-left:4px" title="Coordenada Norte (proyectada) del sitio de la columna. Opcional — necesaria para ubicarla en el módulo GIS.">Norte:</span>
+        <input id="f-col-norte" type="number" step="any" placeholder="—" style="width:76px;flex:none" oninput="onMeta()">
+      </div>
+      <div class="f-row">
+        <span class="f-lbl" title="Elevación (msnm) del sitio de la columna. Opcional — usada por GIS para ubicar el marcador en 3D.">Elev. sitio (msnm):</span>
+        <input id="f-col-elev" type="number" step="any" placeholder="—" style="width:80px;flex:none" oninput="onMeta()">
+      </div>
+    </div>
+
+    <!-- Zoom tool -->
+    <div class="panel-section">
+      <div class="sec-label">Vista</div>
+      <div class="f-row">
+        <button id="btn-zoom-tool" class="btn-sm-add" onclick="toggleZoomTool()"
+                title="Herramienta de lupa: clic en la columna para acercar, Mayús+clic para alejar">🔍 Zoom</button>
+        <button class="btn-sm-add" onclick="resetZoom()" title="Restablecer al 100%" style="margin-left:6px">100%</button>
+      </div>
+    </div>
+
+    <!-- Unit list header -->
+    <div class="panel-section" style="padding-bottom:6px">
+      <div class="sec-label" style="margin:0">Unidades &nbsp;<span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:.6rem">(techo → base)</span></div>
+    </div>
+
+    <!-- Draggable unit list -->
+    <div id="list-units"></div>
+
+    <!-- Add button -->
+    <div id="list-footer">
+      <button class="btn-new" onclick="newEditor()">+ Nueva unidad</button>
+    </div>
+  </aside>
+
+  <!-- Panel 2: SVG column -->
+  <main id="col-view" onclick="onColViewClick(event)"></main>
+
+  <!-- Panel 3: Unit editor -->
+  <aside class="panel" id="edit-panel">
+
+    <!-- Placeholder when nothing selected -->
+    <div id="edit-placeholder">
+      <div class="ph-icon">⬛</div>
+      <div class="ph-text">Selecciona una unidad<br>o crea una nueva</div>
+    </div>
+
+    <!-- Editor form (hidden until a unit is selected) -->
+    <div id="edit-form">
+      <div id="edit-hdr">
+        <span id="edit-hdr-title">Nueva unidad</span>
+        <button class="btn-close" onclick="closeEditor()" title="Cerrar">✕</button>
+      </div>
+
+      <div id="edit-tabs">
+        <button class="tab-btn active" onclick="switchTab(0)">Básico · Litología</button>
+        <button class="tab-btn" onclick="switchTab(1)">Textura · Estructuras</button>
+        <button class="tab-btn" onclick="switchTab(2)">Edad · Observaciones</button>
+      </div>
+
+      <div id="edit-body">
+
+        <div class="tab-pane active">
+        <!-- ── BÁSICO (always open) ───────────────────────────── -->
+        <!-- Esencial — sin acordeón, siempre visible (Código/Espesor son
+             obligatorios para que la unidad exista, mismo criterio que
+             ImportPanel/IonRatioAxisPanel en los otros módulos). Ya NO es
+             clickeable: se retiró toggleSec('sec-basico') a propósito. -->
+        <div class="edit-sec open" id="sec-basico">
+          <div class="edit-sec-toggle static" style="cursor: default;">
+            <span>Básico</span>
+          </div>
+          <div class="edit-sec-body">
+            <div class="fg">
+              <div class="fg-lbl">Código</div>
+              <input id="f-code" type="text" placeholder="U-01, Fm. Zapla, …"
+                     oninput="fd('code', this.value)">
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Rango litoestratigráfico</div>
+              <select id="f-rank" onchange="fd('rank', this.value)">
+                <option value="estrato">Estrato</option>
+                <option value="banco">Banco</option>
+                <option value="lenteja">Lenteja</option>
+                <option value="miembro">Miembro</option>
+                <option value="formacion">Formación</option>
+                <option value="grupo">Grupo</option>
+                <option value="supergrupo">Supergrupo</option>
+              </select>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Espesor (m)</div>
+              <input id="f-thick" type="number" min="0.01" step="0.5" placeholder="5"
+                     oninput="fd('thickness', parseFloat(this.value)||0)">
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Contacto superior</div>
+              <div class="chip-group" id="chips-contact">
+                <div class="chip neto"       onclick="setContact('neto')">Neto</div>
+                <div class="chip gradual"    onclick="setContact('gradual')">Gradual</div>
+                <div class="chip erosivo"    onclick="setContact('erosivo')">Erosivo</div>
+                <div class="chip tectonico"  onclick="setContact('tectonico')">Tectónico</div>
+                <div class="chip no_expuesto" onclick="setContact('no_expuesto')">No expuesto</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── LITOLOGÍA ──────────────────────────────────────── -->
+        <div class="cs-section" id="sec-litho">
+          <button type="button" class="cs-header">
+            <span class="cs-caret"></span><span class="cs-title">Litología</span>
+          </button>
+          <div class="cs-body">
+            <div class="fg">
+              <div class="fg-lbl">Litología principal</div>
+              <div style="position:relative">
+                <input type="text" id="litho-filter" class="chip-filter" style="margin-bottom:3px"
+                       placeholder="Buscar litología..." autocomplete="off"
+                       oninput="filterLitho(this.value)"
+                       onkeydown="onLithoKey(event)"
+                       onfocus="filterLitho(this.value)"
+                       onblur="setTimeout(()=>hideLithoSugg(),180)">
+                <div id="litho-suggestions"></div>
+              </div>
+              <select id="f-litho" onchange="fd('primaryLithology', this.value); clearLithoFilter()">
+                <option value="">— Sin especificar —</option>
+                <optgroup label="Clásticas">
+                  <option>Conglomerado</option><option>Brecha sedimentaria</option>
+                  <option>Arenisca gruesa</option><option>Arenisca media</option>
+                  <option>Arenisca fina</option><option>Limolita</option>
+                  <option>Lutita</option><option>Arcillita</option><option>Pelita</option>
+                  <option>Wacka</option>
+                </optgroup>
+                <optgroup label="Carbonáticas">
+                  <option>Caliza</option><option>Caliza arrecifal</option>
+                  <option>Caliza dolomítica</option><option>Dolomía</option><option>Marga</option>
+                </optgroup>
+                <optgroup label="Químicas / bioquímicas">
+                  <option>Evaporita</option><option>Yeso</option><option>Sal</option>
+                  <option>Carbón</option><option>Lignito</option>
+                  <option>Pedernal</option><option>Chert</option>
+                </optgroup>
+                <optgroup label="Volcánicas efusivas">
+                  <option>Lava basáltica</option><option>Lava almohadillada (pillow)</option>
+                  <option>Lava andesítica</option><option>Lava riolítica</option><option>Lava dacítica</option>
+                </optgroup>
+                <optgroup label="Piroclásticas">
+                  <option>Ignimbrita soldada</option><option>Ignimbrita no soldada</option>
+                  <option>Toba</option><option>Toba vítrea</option><option>Toba lítica</option>
+                  <option>Lahár</option><option>Brecha volcánica</option>
+                  <option>Depósito de caída piroclástica</option>
+                </optgroup>
+                <optgroup label="Subvolcánicas">
+                  <option>Dique</option><option>Sill</option>
+                </optgroup>
+                <optgroup label="USGS — Clastic Sedimentary">
+                  <option>Gravel</option><option>Crossbedded gravel</option>
+                  <option>Massive sandstone</option><option>Bedded sandstone</option>
+                  <option>Crossbedded sandstone</option><option>Ripple-marked sandstone</option>
+                  <option>Argillaceous sandstone</option><option>Calcareous sandstone</option>
+                  <option>Sandy siltstone</option><option>Bedded siltstone</option>
+                  <option>Sandy shale</option><option>Clay shale</option><option>Chalk</option>
+                  <option>Sandy limestone</option><option>Fossiliferous limestone</option>
+                  <option>Oolitic limestone</option><option>Cherty limestone</option>
+                  <option>Oolitic dolostone</option>
+                </optgroup>
+                <optgroup label="USGS — Chemical / Organic">
+                  <option>Peat</option><option>Oil shale</option>
+                  <option>Bentonite</option><option>Glauconite</option><option>Limonite</option>
+                  <option>Chert (USGS)</option><option>Gypsum (USGS)</option><option>Salt / Halite</option>
+                </optgroup>
+                <optgroup label="USGS — Glacial / Unconsolidated">
+                  <option>Till / Diamicton</option><option>Loess</option>
+                </optgroup>
+                <optgroup label="USGS — Metamorphic">
+                  <option>Metamorphic rock</option><option>Quartzite</option>
+                  <option>Slate</option><option>Phyllite</option><option>Schist</option>
+                  <option>Marble</option><option>Gneiss</option><option>Serpentinite</option>
+                </optgroup>
+                <optgroup label="USGS — Igneous">
+                  <option>Granite</option><option>Granodiorite</option>
+                  <option>Diorite</option><option>Gabbro</option><option>Peridotite</option>
+                  <option>Porphyritic rock</option><option>Vitrophyre</option>
+                </optgroup>
+                <optgroup label="USGS — Clastic (extended)">
+                  <option>Gravel (2nd option)</option><option>Breccia (1st option)</option><option>Breccia (2nd option)</option>
+                  <option>Crossbedded sandstone (2nd)</option><option>Dolomitic sandstone</option>
+                  <option>Silt / Siltstone</option><option>Calcareous siltstone</option><option>Dolomitic siltstone</option>
+                  <option>Subgraywacke</option><option>Crossbedded subgraywacke</option><option>Ripple-bedded subgraywacke</option>
+                </optgroup>
+                <optgroup label="USGS — Shale Variants">
+                  <option>Cherty shale</option><option>Dolomitic shale</option>
+                  <option>Calcareous shale</option><option>Carbonaceous shale</option>
+                </optgroup>
+                <optgroup label="USGS — Limestone Variants">
+                  <option>Limestone</option><option>Clastic limestone</option><option>Nodular limestone</option>
+                  <option>Limestone saccharoidal dolomite</option><option>Crossbedded limestone</option>
+                  <option>Cherty crossbedded limestone</option><option>Cherty sandy clastic limestone</option>
+                  <option>Silty limestone</option><option>Argillaceous limestone</option>
+                  <option>Cherty limestone (2nd)</option><option>Dolomitic limestone</option>
+                </optgroup>
+                <optgroup label="USGS — Dolostone Variants">
+                  <option>Dolostone</option><option>Crossbedded dolostone</option>
+                  <option>Sandy dolostone</option><option>Silty dolostone</option>
+                  <option>Argillaceous dolostone</option><option>Cherty dolostone</option>
+                </optgroup>
+                <optgroup label="USGS — Chert &amp; Fossiliferous">
+                  <option>Bedded chert (1st)</option><option>Bedded chert (2nd)</option>
+                  <option>Fossiliferous bedded chert</option><option>Fossiliferous rock</option>
+                  <option>Diatomaceous rock</option>
+                </optgroup>
+                <optgroup label="USGS — Chemical (extended)">
+                  <option>Coal</option><option>Bony coal</option><option>Underclay</option>
+                  <option>Flint clay</option><option>Siderite</option><option>Phosphatic rock</option>
+                </optgroup>
+                <optgroup label="USGS — Interbedded">
+                  <option>Interbedded ss/siltstone</option><option>Interbedded ss/shale</option>
+                  <option>Interbedded ripple ss/shale</option>
+                  <option>Interbedded shale/ls (shale dom.)</option><option>Interbedded shale/ls (1st)</option>
+                  <option>Interbedded shale/ls (2nd)</option><option>Interbedded calc-shale/ls</option>
+                  <option>Interbedded silty ls/shale</option><option>Interbedded ls/shale (1st)</option>
+                  <option>Interbedded ls/shale (2nd)</option><option>Interbedded ls/shale (ls dom.)</option>
+                  <option>Interbedded ls/calc-shale</option>
+                </optgroup>
+                <optgroup label="USGS — Glacial (extended)">
+                  <option>Till (2nd option)</option><option>Till (3rd option)</option>
+                  <option>Loess (2nd option)</option><option>Loess (3rd option)</option>
+                </optgroup>
+                <optgroup label="USGS — Metamorphic (extended)">
+                  <option>Schistose granite</option><option>Contorted schist</option>
+                  <option>Schist and gneiss</option><option>Contorted gneiss</option>
+                  <option>Soapstone / Talc</option>
+                </optgroup>
+                <optgroup label="USGS — Tuffaceous / Volcanic">
+                  <option>Tuffaceous rock</option><option>Crystal tuff</option>
+                  <option>Devitrified tuff</option><option>Volcanic breccia and tuff</option>
+                  <option>Volcanic breccia / agglomerate</option><option>Zeolitic rock</option>
+                  <option>Basaltic flows</option>
+                </optgroup>
+                <optgroup label="USGS — Igneous (extended)">
+                  <option>Granite (2nd option)</option><option>Banded igneous rock</option>
+                  <option>Igneous rock (1st)</option><option>Igneous rock (2nd)</option>
+                  <option>Igneous rock (3rd)</option><option>Igneous rock (4th)</option>
+                  <option>Igneous rock (5th)</option><option>Igneous rock (6th)</option>
+                  <option>Igneous rock (7th)</option><option>Igneous rock (8th)</option>
+                  <option>Porphyritic rock (2nd)</option><option>Quartz</option><option>Ore</option>
+                </optgroup>
+              </select>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Tamaño de grano</div>
+              <select id="f-grain" onchange="fd('grainSize', this.value); refreshGradacion()">
+                <option value="">— Sin especificar —</option>
+                <option value="bloque">Bloque (&gt;256 mm)</option>
+                <option value="guijarro">Guijarro (64–256 mm)</option>
+                <option value="grava">Grava (4–64 mm)</option>
+                <option value="granulo">Grânulo (2–4 mm)</option>
+                <option value="arena_muy_gruesa">Arena muy gruesa (1–2 mm)</option>
+                <option value="arena_gruesa">Arena gruesa (0.5–1 mm)</option>
+                <option value="arena_media">Arena media (0.25–0.5 mm)</option>
+                <option value="arena_fina">Arena fina (0.125–0.25 mm)</option>
+                <option value="arena_muy_fina">Arena muy fina (0.063–0.125 mm)</option>
+                <option value="limo">Limo (0.002–0.063 mm)</option>
+                <option value="arcilla">Arcilla (&lt;0.002 mm)</option>
+              </select>
+            </div>
+            <!-- Rango granulométrico: control de PRIMER NIVEL para cualquier
+                 unidad, DESACOPLADO de las estructuras de gradación. Base ≠ techo
+                 dibuja la forma afinada (la dirección la dan los números);
+                 base == techo o "Limpiar" = sin rango → rectángulo plano. -->
+            <div class="fg">
+              <div class="fg-lbl">Rango granulométrico</div>
+              <div class="grad-row">
+                <span class="grad-lbl">De</span>
+                <select id="grad-desde" class="grad-sel" onchange="updateGradacion()">
+                  <option value="bloque">Bloque</option>
+                  <option value="guijarro">Guijarro</option>
+                  <option value="grava">Grava</option>
+                  <option value="granulo">Grânulo</option>
+                  <option value="arena_muy_gruesa">A. muy gruesa</option>
+                  <option value="arena_gruesa">A. gruesa</option>
+                  <option value="arena_media">A. media</option>
+                  <option value="arena_fina">A. fina</option>
+                  <option value="arena_muy_fina">A. muy fina</option>
+                  <option value="limo">Limo</option>
+                  <option value="arcilla">Arcilla</option>
+                </select>
+                <span class="grad-arrow">→</span>
+                <span class="grad-lbl">A</span>
+                <select id="grad-hasta" class="grad-sel" onchange="updateGradacion()">
+                  <option value="bloque">Bloque</option>
+                  <option value="guijarro">Guijarro</option>
+                  <option value="grava">Grava</option>
+                  <option value="granulo">Grânulo</option>
+                  <option value="arena_muy_gruesa">A. muy gruesa</option>
+                  <option value="arena_gruesa">A. gruesa</option>
+                  <option value="arena_media">A. media</option>
+                  <option value="arena_fina">A. fina</option>
+                  <option value="arena_muy_fina">A. muy fina</option>
+                  <option value="limo">Limo</option>
+                  <option value="arcilla">Arcilla</option>
+                </select>
+                <button type="button" class="grad-clear" onclick="clearGradacion()" title="Sin rango (rectángulo plano)">Limpiar</button>
+              </div>
+              <div class="grad-hint" id="grad-hint"></div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Facies volcánica</div>
+              <select id="f-facies" onchange="fd('volcanicFacies', this.value)">
+                <option value="">— Sin especificar —</option>
+                <option>Flujo lávico basáltico</option>
+                <option>Lava almohadillada (pillow)</option>
+                <option>Ignimbrita soldada</option>
+                <option>Depósito de caída piroclástica</option>
+                <option>Flujo piroclástico</option>
+                <option>Lahár (flujo de escombros volcánicos)</option>
+                <option>Dique</option><option>Sill</option>
+                <option>Brecha volcánica subvolcánica</option>
+                <option>Depósito epiclástico volcánico</option>
+              </select>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Litologías secundarias</div>
+              <select id="f-sec-litho" onchange="addSecLitho(this.value); this.value=''">
+                <option value="">+ Agregar —</option>
+                <option>Conglomerado</option><option>Arenisca gruesa</option>
+                <option>Arenisca media</option><option>Arenisca fina</option>
+                <option>Limolita</option><option>Lutita</option>
+                <option>Caliza</option><option>Dolomía</option>
+                <option>Evaporita</option><option>Carbón</option>
+                <option>Toba</option><option>Lava basáltica</option>
+              </select>
+              <div class="sec-litho-tags" id="tags-sec-litho"></div>
+            </div>
+          </div>
+        </div>
+
+        </div><!-- /tab-pane 1 -->
+
+        <div class="tab-pane">
+        <!-- ── ATRIBUTOS ──────────────────────────────────────── -->
+        <div class="cs-section" id="sec-attr">
+          <button type="button" class="cs-header">
+            <span class="cs-caret"></span><span class="cs-title">Textura y estructuras</span>
+          </button>
+          <div class="cs-body">
+            <div class="fg">
+              <div class="fg-lbl">Textura</div>
+              <input id="f-texture" type="text" placeholder="e.g. granular, bioclástica…"
+                     oninput="fd('texture', this.value)">
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Estructuras sedimentarias y fósiles</div>
+              <input type="text" id="struct-filter" class="chip-filter" placeholder="Buscar estructura o fósil..." oninput="filterStructChips(this.value)" autocomplete="off">
+              <div class="chip-group" id="chips-struct">
+                <div class="cg-block collapsed" data-cg="ord-interno">
+                  <div class="chip-cat-lbl cg-toggle" onclick="toggleChipGroup(this)">Ordenamiento interno <span class="cg-arr">▾</span></div>
+                  <div class="cg-body">
+                    <div class="chip" onclick="toggleStruct('Masiva')">Masiva</div>
+                    <div class="chip" onclick="toggleStruct('Laminación paralela')">Lamin. paralela</div>
+                    <div class="chip" onclick="toggleStruct('Laminación ondulada')">Lamin. ondulada</div>
+                    <div class="chip" onclick="toggleStruct('Laminación cruzada')">Lamin. cruzada</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación cruzada')">Est. cruzada</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación cruzada planar')">Est. cruzada planar</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación cruzada en artesa')">Est. artesa</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación flaser')">Flaser</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación lenticular')">Lenticular</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación ondulada')">Ondulada</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación cruzada herringbone')">Herringbone</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación cruzada hummocky')">Hummocky</div>
+                    <div class="chip" onclick="toggleStruct('Estratificación cruzada en surco')">Est. en surco</div>
+                    <div class="chip" onclick="toggleStruct('Gradación normal')">Grad. normal</div>
+                    <div class="chip" onclick="toggleStruct('Gradación inversa')">Grad. inversa</div>
+                    <div class="chip" onclick="toggleStruct('Granoclasificación normal')">Granoclasif. normal</div>
+                    <div class="chip" onclick="toggleStruct('Granoclasificación inversa')">Granoclasif. inversa</div>
+                    <div class="chip" onclick="toggleStruct('Imbricación de clastos')">Imbricación</div>
+                  </div>
+                </div>
+                <div class="cg-block collapsed" data-cg="superficies">
+                  <div class="chip-cat-lbl cg-toggle" onclick="toggleChipGroup(this)">Superficies de estratificación <span class="cg-arr">▾</span></div>
+                  <div class="cg-body">
+                    <div class="chip" onclick="toggleStruct('Ondulitas')">Ondulitas</div>
+                    <div class="chip" onclick="toggleStruct('Ripples de corrientes')">Ripples corrientes</div>
+                    <div class="chip" onclick="toggleStruct('Ripples de olas')">Ripples olas</div>
+                    <div class="chip" onclick="toggleStruct('Flute casts')">Flute casts</div>
+                    <div class="chip" onclick="toggleStruct('Groove casts')">Groove casts</div>
+                    <div class="chip" onclick="toggleStruct('Crescent marks')">Crescent marks</div>
+                    <div class="chip" onclick="toggleStruct('Bounce casts')">Bounce casts</div>
+                    <div class="chip" onclick="toggleStruct('Prod casts')">Prod casts</div>
+                    <div class="chip" onclick="toggleStruct('Chevron casts')">Chevron casts</div>
+                    <div class="chip" onclick="toggleStruct('Skip casts')">Skip casts</div>
+                    <div class="chip" onclick="toggleStruct('Brush casts')">Brush casts</div>
+                    <div class="chip" onclick="toggleStruct('Impresiones de gotas de lluvia')">Gotas de lluvia</div>
+                    <div class="chip" onclick="toggleStruct('Grietas de desecación')">Grietas desec.</div>
+                    <div class="chip" onclick="toggleStruct('Superficie de omisión')">Sup. omisión</div>
+                    <div class="chip" onclick="toggleStruct('Superficie endurecida')">Hardground</div>
+                    <div class="chip" onclick="toggleStruct('Superficie karstificada')">Sup. karstif.</div>
+                    <div class="chip" onclick="toggleStruct('Superficie erosionada')">Sup. erosionada</div>
+                  </div>
+                </div>
+                <div class="cg-block collapsed" data-cg="deformacion">
+                  <div class="chip-cat-lbl cg-toggle" onclick="toggleChipGroup(this)">Deformación <span class="cg-arr">▾</span></div>
+                  <div class="cg-body">
+                    <div class="chip" onclick="toggleStruct('Calcos de carga (load casts)')">Calcos carga</div>
+                    <div class="chip" onclick="toggleStruct('Areniscas almohadilladas')">Almohadilladas</div>
+                    <div class="chip" onclick="toggleStruct('Diques clásticos')">Diques clásticos</div>
+                    <div class="chip" onclick="toggleStruct('Slumping')">Slumping</div>
+                    <div class="chip" onclick="toggleStruct('Laminación convoluta')">Convolute</div>
+                    <div class="chip" onclick="toggleStruct('Estructuras dish')">Estructuras dish</div>
+                    <div class="chip" onclick="toggleStruct('Pilares')">Pilares</div>
+                    <div class="chip" onclick="toggleStruct('Rudita intraformacional')">Rudita intraform.</div>
+                    <div class="chip" onclick="toggleStruct('Fallas sinsedimentarias')">Fallas sinsed.</div>
+                    <div class="chip" onclick="toggleStruct('Tepee')">Tepee</div>
+                    <div class="chip" onclick="toggleStruct('Deformación por licuefacción')">Licuefacción</div>
+                  </div>
+                </div>
+                <div class="cg-block collapsed" data-cg="organicas">
+                  <div class="chip-cat-lbl cg-toggle" onclick="toggleChipGroup(this)">Orgánicas y diagenéticas <span class="cg-arr">▾</span></div>
+                  <div class="cg-body">
+                    <div class="chip" onclick="toggleStruct('Bioturbación (en general)')">Bioturbación</div>
+                    <div class="chip" onclick="toggleStruct('Laminación de algas')">Lamin. algas</div>
+                    <div class="chip" onclick="toggleStruct('Estromatolitos')">Estromatolitos</div>
+                    <div class="chip" onclick="toggleStruct('Perforaciones')">Perforaciones</div>
+                    <div class="chip" onclick="toggleStruct('Excavaciones')">Excavaciones</div>
+                    <div class="chip" onclick="toggleStruct('Pistas')">Pistas</div>
+                    <div class="chip" onclick="toggleStruct('Pisadas')">Pisadas</div>
+                    <div class="chip" onclick="toggleStruct('Rizocreciones')">Rizocreciones</div>
+                    <div class="chip" onclick="toggleStruct('Chondrites')">Chondrites</div>
+                    <div class="chip" onclick="toggleStruct('Nereites')">Nereites</div>
+                    <div class="chip" onclick="toggleStruct('Helmintoides')">Helmintoides</div>
+                    <div class="chip" onclick="toggleStruct('Paleodictyon')">Paleodictyon</div>
+                    <div class="chip" onclick="toggleStruct('Fucoides')">Fucoides</div>
+                    <div class="chip" onclick="toggleStruct('Zoophycos')">Zoophycos</div>
+                    <div class="chip" onclick="toggleStruct('Thalassinoides')">Thalassinoides</div>
+                    <div class="chip" onclick="toggleStruct('Cruziana')">Cruziana</div>
+                    <div class="chip" onclick="toggleStruct('Skolithos')">Skolithos</div>
+                    <div class="chip" onclick="toggleStruct('Rhizocorallium')">Rhizocorallium</div>
+                    <div class="chip" onclick="toggleStruct('Estilolitos')">Estilolitos</div>
+                    <div class="chip" onclick="toggleStruct('Cristales de pirita')">Pirita</div>
+                    <div class="chip" onclick="toggleStruct('Fenestras')">Fenestras</div>
+                    <div class="chip" onclick="toggleStruct('Nódulos y concreciones')">Nódulos</div>
+                    <div class="chip" onclick="toggleStruct('Cristales de yeso')">Yesos</div>
+                    <div class="chip" onclick="toggleStruct('Venas')">Venas</div>
+                  </div>
+                </div>
+                <div class="cg-block collapsed" data-cg="fosilifero">
+                  <div class="chip-cat-lbl cg-toggle" onclick="toggleChipGroup(this)">Contenido fosilífero <span class="cg-arr">▾</span></div>
+                  <div class="cg-body">
+                    <div class="chip" onclick="toggleStruct('Fósiles escasos')">Escasos</div>
+                    <div class="chip" onclick="toggleStruct('Fósiles común')">Común</div>
+                    <div class="chip" onclick="toggleStruct('Fósiles abundante')">Abundante</div>
+                    <div class="chip" onclick="toggleStruct('Bioherma')">Bioherma</div>
+                  </div>
+                </div>
+                <div class="cg-block collapsed" data-cg="macrofosiles">
+                  <div class="chip-cat-lbl cg-toggle" onclick="toggleChipGroup(this)">Macrofósiles <span class="cg-arr">▾</span></div>
+                  <div class="cg-body">
+                    <div class="chip" onclick="toggleStruct('Fauna (en general)')">Fauna gral.</div>
+                    <div class="chip" onclick="toggleStruct('Flora (en general)')">Flora gral.</div>
+                    <div class="chip" onclick="toggleStruct('Algas (en general)')">Algas</div>
+                    <div class="chip" onclick="toggleStruct('Ammonites')">Ammonites</div>
+                    <div class="chip" onclick="toggleStruct('Arqueociátidos')">Arqueociátidos</div>
+                    <div class="chip" onclick="toggleStruct('Belemnites')">Belemnites</div>
+                    <div class="chip" onclick="toggleStruct('Briozoos (colonias)')">Briozoos col.</div>
+                    <div class="chip" onclick="toggleStruct('Braquiópodos')">Braquiópodos</div>
+                    <div class="chip" onclick="toggleStruct('Cirrípedos')">Cirrípedos</div>
+                    <div class="chip" onclick="toggleStruct('Corales aislados')">Corales aisl.</div>
+                    <div class="chip" onclick="toggleStruct('Corales coloniales')">Corales col.</div>
+                    <div class="chip" onclick="toggleStruct('Corales (hexacoralarios)')">Hexacoral.</div>
+                    <div class="chip" onclick="toggleStruct('Corales (tetracoralarios)')">Tetracoral.</div>
+                    <div class="chip" onclick="toggleStruct('Crinoides')">Crinoides</div>
+                    <div class="chip" onclick="toggleStruct('Dientes de mamíferos')">Dientes mamíf.</div>
+                    <div class="chip" onclick="toggleStruct('Equínidos')">Equínidos</div>
+                    <div class="chip" onclick="toggleStruct('Esponjas')">Esponjas</div>
+                    <div class="chip" onclick="toggleStruct('Estromatopóridos')">Estromatopóridos</div>
+                    <div class="chip" onclick="toggleStruct('Gasterópodos continentales')">Gastróp. cont.</div>
+                    <div class="chip" onclick="toggleStruct('Gasterópodos marinos')">Gastróp. mar.</div>
+                    <div class="chip" onclick="toggleStruct('Graptolites')">Graptolites</div>
+                    <div class="chip" onclick="toggleStruct('Lamelibranquios (en general)')">Lamelibranquios</div>
+                    <div class="chip" onclick="toggleStruct('Moluscos (en general)')">Moluscos</div>
+                    <div class="chip" onclick="toggleStruct('Nautiloideos')">Nautiloideos</div>
+                    <div class="chip" onclick="toggleStruct('Ortocerátidos')">Ortocerátidos</div>
+                    <div class="chip" onclick="toggleStruct('Ostreidos')">Ostreidos</div>
+                    <div class="chip" onclick="toggleStruct('Peces')">Peces</div>
+                    <div class="chip" onclick="toggleStruct('Raíces')">Raíces</div>
+                    <div class="chip" onclick="toggleStruct('Rudistas')">Rudistas</div>
+                    <div class="chip" onclick="toggleStruct('Serpúlidos')">Serpúlidos</div>
+                    <div class="chip" onclick="toggleStruct('Trilobites')">Trilobites</div>
+                    <div class="chip" onclick="toggleStruct('Vertebrados')">Vertebrados</div>
+                  </div>
+                </div>
+                <div class="cg-block collapsed" data-cg="microfosiles">
+                  <div class="chip-cat-lbl cg-toggle" onclick="toggleChipGroup(this)">Microfósiles <span class="cg-arr">▾</span></div>
+                  <div class="cg-body">
+                    <div class="chip" onclick="toggleStruct('Algas coralináceas')">Alg. coralináces</div>
+                    <div class="chip" onclick="toggleStruct('Algas dasycladáceas')">Alg. dasycladáces</div>
+                    <div class="chip" onclick="toggleStruct('Algas verdes - azules (cianofíceas)')">Cianofíceas</div>
+                    <div class="chip" onclick="toggleStruct('Briozoos')">Briozoos</div>
+                    <div class="chip" onclick="toggleStruct('Calciesferas')">Calciesferas</div>
+                    <div class="chip" onclick="toggleStruct('Caráceas')">Caráceas</div>
+                    <div class="chip" onclick="toggleStruct('Cocolitos')">Cocolitos</div>
+                    <div class="chip" onclick="toggleStruct('Conodontos')">Conodontos</div>
+                    <div class="chip" onclick="toggleStruct('Diatomeas')">Diatomeas</div>
+                    <div class="chip" onclick="toggleStruct('Dinoflagelados')">Dinoflagelados</div>
+                    <div class="chip" onclick="toggleStruct('Espículas de esponjas')">Espículas</div>
+                    <div class="chip" onclick="toggleStruct('Filamentos')">Filamentos</div>
+                    <div class="chip" onclick="toggleStruct('Foraminíferos bentónicos (en general)')">Foram. bentónicos</div>
+                    <div class="chip" onclick="toggleStruct('Alveolinas')">Alveolinas</div>
+                    <div class="chip" onclick="toggleStruct('Asilinas')">Asilinas</div>
+                    <div class="chip" onclick="toggleStruct('Discociclinas')">Discociclinas</div>
+                    <div class="chip" onclick="toggleStruct('Fusulinas')">Fusulinas</div>
+                    <div class="chip" onclick="toggleStruct('Miliólidos')">Miliólidos</div>
+                    <div class="chip" onclick="toggleStruct('Nummulites')">Nummulites</div>
+                    <div class="chip" onclick="toggleStruct('Operculinas')">Operculinas</div>
+                    <div class="chip" onclick="toggleStruct('Orbitoides')">Orbitoides</div>
+                    <div class="chip" onclick="toggleStruct('Orbitolinas')">Orbitolinas</div>
+                    <div class="chip" onclick="toggleStruct('Foraminíferos planctónicos')">Foram. planctón.</div>
+                    <div class="chip" onclick="toggleStruct('Nannoplancton calizo')">Nannopl. calizo</div>
+                    <div class="chip" onclick="toggleStruct('Ostrácodos')">Ostrácodos</div>
+                    <div class="chip" onclick="toggleStruct('Polen y esporas')">Polen y esporas</div>
+                    <div class="chip" onclick="toggleStruct('Radiolarios')">Radiolarios</div>
+                    <div class="chip" onclick="toggleStruct('Saccocomidae')">Saccocomidae</div>
+                    <div class="chip" onclick="toggleStruct('Tentaculites')">Tentaculites</div>
+                    <div class="chip" onclick="toggleStruct('Tintínidos')">Tintínidos</div>
+                  </div>
+                </div>
+              </div>
+              <div id="struct-pos-list" style="display:none"></div>
+              <div class="fg" style="margin-top:8px">
+                <div class="fg-lbl">Datos estructurales</div>
+                <div id="struct-data-list"></div>
+                <button class="btn-sm-add" onclick="addStructData()" style="margin-top:4px">+ Medida estructural</button>
+              </div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Contenido fosilífero</div>
+              <div class="chip-group" id="chips-fossil">
+                <div class="chip" onclick="setFossil('esteril')">Estéril</div>
+                <div class="chip" onclick="setFossil('escasos')">Escasos</div>
+                <div class="chip" onclick="setFossil('comun')">Común</div>
+                <div class="chip" onclick="setFossil('abundante')">Abundante</div>
+                <div class="chip" onclick="setFossil('bioherma')">Bioherma</div>
+              </div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Color Munsell</div>
+              <div class="munsell-row">
+                <input id="f-m-hue" type="text" placeholder="10YR" style="width:50px;flex:none"
+                       oninput="setColor('hue', this.value)">
+                <input id="f-m-val" type="number" placeholder="6" min="0" max="10" step="1" style="width:40px;flex:none"
+                       oninput="setColor('value', parseFloat(this.value))">
+                <span class="munsell-sep">/</span>
+                <input id="f-m-chr" type="number" placeholder="4" min="0" max="14" step="2" style="width:40px;flex:none"
+                       oninput="setColor('chroma', parseFloat(this.value))">
+                <input id="f-m-lbl" type="text" placeholder="pardo amarillento" style="flex:1"
+                       oninput="setColor('label', this.value)">
+              </div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Color de relleno (ICS o personalizado)</div>
+              <div class="cs-row" style="gap:6px">
+                <input type="color" id="f-color-fill" value="#d8d8d8"
+                       oninput="onFillPickerChange(this.value)"
+                       style="width:34px;height:26px;border:1px solid var(--border);border-radius:3px;padding:1px 2px;cursor:pointer;flex-shrink:0">
+                <input type="text" id="f-color-fill-hex" placeholder="#d8d8d8" maxlength="7"
+                       style="width:70px;font-size:0.65rem"
+                       oninput="onFillHexInput(this.value)">
+                <button onclick="clearFillColor()" title="Quitar color personalizado"
+                        style="font-size:0.62rem;background:none;border:1px solid var(--border);color:var(--text-muted);padding:2px 7px;border-radius:2px;cursor:pointer;flex-shrink:0">Quitar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        </div><!-- /tab-pane 2 -->
+
+        <div class="tab-pane">
+        <!-- ── EDAD ──────────────────────────────────────────────── -->
+        <div class="cs-section" id="sec-age">
+          <button type="button" class="cs-header">
+            <span class="cs-caret"></span><span class="cs-title">Edad geológica</span>
+          </button>
+          <div class="cs-body">
+            <!-- Cascading ICS selectors -->
+            <div class="fg">
+              <div class="fg-lbl">Eón</div>
+              <div class="cs-row">
+                <span class="cs-swatch" id="cs-sw-eon"></span>
+                <select id="cs-eon" class="cs-sel" onchange="onCsEon(this.value)">
+                  <option value="">— Sin especificar —</option>
+                </select>
+              </div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Era</div>
+              <div class="cs-row">
+                <span class="cs-swatch" id="cs-sw-era"></span>
+                <select id="cs-era" class="cs-sel" onchange="onCsEra(this.value)">
+                  <option value="">— Era —</option>
+                </select>
+              </div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Período</div>
+              <div class="cs-row">
+                <span class="cs-swatch" id="cs-sw-period"></span>
+                <select id="cs-period" class="cs-sel" onchange="onCsPeriod(this.value)">
+                  <option value="">— Período —</option>
+                </select>
+              </div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Época</div>
+              <div class="cs-row">
+                <span class="cs-swatch" id="cs-sw-epoca"></span>
+                <select id="cs-epoca" class="cs-sel" onchange="onCsEpoca(this.value)">
+                  <option value="">— Época —</option>
+                </select>
+              </div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Edad</div>
+              <div class="cs-row">
+                <span class="cs-swatch" id="cs-sw-edad"></span>
+                <select id="cs-edad" class="cs-sel" onchange="onCsEdad(this.value)">
+                  <option value="">— Edad —</option>
+                </select>
+              </div>
+            </div>
+            <div class="fg">
+              <button id="btn-ics-apply" class="btn-ics-apply" onclick="applyIcsColor()" style="display:none">
+                Usar color ICS en unidad
+              </button>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Edad absoluta (Ma)</div>
+              <div class="f-row" style="gap:4px;margin:0">
+                <input id="f-age-min" type="number" placeholder="Min" step="0.1"
+                       oninput="setAgeAbs('min', parseFloat(this.value))">
+                <span style="color:var(--text-muted);flex-shrink:0">–</span>
+                <input id="f-age-max" type="number" placeholder="Max" step="0.1"
+                       oninput="setAgeAbs('max', parseFloat(this.value))">
+              </div>
+            </div>
+            <div class="fg">
+              <div class="fg-lbl">Confianza</div>
+              <select id="f-age-conf" onchange="setAge('confidence', this.value)">
+                <option value="">— —</option>
+                <option value="datado">Datado</option>
+                <option value="interpretado">Interpretado</option>
+                <option value="estimado">Estimado</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── OBSERVACIONES ─────────────────────────────────────── -->
+        <div class="cs-section" id="sec-obs">
+          <button type="button" class="cs-header">
+            <span class="cs-caret"></span><span class="cs-title">Observaciones de campo</span>
+          </button>
+          <div class="cs-body">
+            <div class="fg">
+              <textarea id="f-obs" placeholder="Descripción macroscópica, notas de campo…"
+                        rows="4" oninput="fd('fieldObservations', this.value)"></textarea>
+            </div>
+          </div>
+        </div>
+
+        </div><!-- /tab-pane 3 -->
+
+      </div><!-- /#edit-body -->
+
+      <div id="edit-footer">
+        <button class="btn-delete" id="btn-delete" onclick="askDelete()" disabled>Eliminar</button>
+        <button class="btn-cancel" onclick="closeEditor()">Cancelar</button>
+        <button class="btn-save"   onclick="saveEditor()">Guardar</button>
+      </div>
+    </div><!-- /#edit-form -->
+  </aside>
+</div>
+
+<!-- ── Correlación estratigráfica (pestaña fija) ───────────────────
+     Lienzo apaisado. Etapa 2: solo el shell/placeholder — los selectores
+     y el renderizado lado a lado llegan en etapas posteriores. Oculto por
+     defecto (la vista inicial es una columna); switchToCorrelation() lo
+     muestra y _showColumnView() lo oculta. -->
+<div id="correlation-view" style="display:none">
+  <!-- Fila de selectores: un slot por columna a comparar. La arma
+       renderCorrelation() cada vez que se abre la pestaña. -->
+  <div id="correlation-selectors"></div>
+  <!-- Escala vertical compartida: por defecto AUTOMÁTICA (derivada de la
+       columna más larga entre las seleccionadas); el input la sobrescribe.
+       La arma renderCorrelation(). -->
+  <div id="correlation-scalebar"></div>
+  <div id="correlation-canvas">
+    <div class="corr-placeholder">
+      <div class="corr-ph-icon">↔</div>
+      <div class="corr-ph-title">Correlación estratigráfica</div>
+      <div class="corr-ph-sub">Aquí se mostrarán las columnas seleccionadas lado a lado, con escala vertical compartida.</div>
+    </div>
+  </div>
+  <!-- Menú flotante de una línea de correlación (modo Selección): color +
+       eliminar. Lo abre/posiciona _corrOpenLineMenu() al hacer clic en una línea. -->
+  <div id="corr-line-menu" style="display:none">
+    <div class="corr-line-menu-row">
+      <span>Color de la línea</span>
+      <input type="color" id="corr-line-color" oninput="corrSetLineColor(this.value)" title="Color de la línea">
+    </div>
+    <div class="corr-line-menu-row">
+      <span>Grosor</span>
+      <input type="range" id="corr-line-thickness" min="1" max="8" step="0.5" oninput="corrSetLineThickness(this.value)" title="Grosor de la línea (px)">
+      <span id="corr-line-thickness-val" class="corr-line-thickness-val">2</span>
+    </div>
+    <button class="corr-line-del-btn" onclick="corrDeleteSelectedLine()">Eliminar línea</button>
+  </div>
+  <!-- Panel de controles de un cuadro de texto (modo Selección): tamaño,
+       color, rotación 0-360° con atajos Horizontal/Vertical, y eliminar. -->
+  <div id="corr-text-menu" style="display:none">
+    <div class="ctm-row"><span>Tamaño</span>
+      <input type="number" id="corr-text-size" min="6" max="200" step="1" oninput="corrSetTextSize(this.value)"></div>
+    <div class="ctm-row"><span>Color</span>
+      <input type="color" id="corr-text-color" oninput="corrSetTextColor(this.value)"></div>
+    <div class="ctm-row"><span>Rotación</span>
+      <input type="range" id="corr-text-rot" min="0" max="360" step="1" oninput="corrSetTextRotation(this.value)">
+      <input type="number" id="corr-text-rot-num" min="0" max="360" step="1" oninput="corrSetTextRotation(this.value)"><span>°</span></div>
+    <div class="ctm-row">
+      <button class="corr-tool-btn" onclick="corrTextRotationPreset(0)" title="Fijar a 0°">Horizontal</button>
+      <button class="corr-tool-btn" onclick="corrTextRotationPreset(90)" title="Fijar a 90°">Vertical</button></div>
+    <button class="corr-line-del-btn" onclick="corrDeleteSelectedText()">Eliminar cuadro</button>
+  </div>
+  <!-- Input flotante para editar el contenido de un cuadro (doble clic / al crear). -->
+  <input type="text" id="corr-text-edit" style="display:none" data-editing=""
+         oninput="corrEditTextInput(this.value)" onblur="corrEditTextEnd()"
+         onkeydown="if(event.key==='Enter'||event.key==='Escape'){event.stopPropagation();this.blur();}">
+</div>
+<!-- Aviso transitorio (toast) — vive fuera de #correlation-view para verse
+     también tras salir a una columna (p. ej. al eliminar una columna). -->
+<div id="corr-notice" style="display:none"></div>
+
+<!-- ── Confirm modal ───────────────────────────────────────────── -->
+<div id="modal">
+  <div class="modal-box">
+    <div class="modal-title">Eliminar unidad</div>
+    <div class="modal-body">
+      ¿Eliminar <strong id="modal-unit-name">?</strong>? Esta acción no se puede deshacer.
+    </div>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeModal()">Cancelar</button>
+      <button class="btn-danger" onclick="confirmDelete()">Eliminar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Footer ──────────────────────────────────────────────────── -->
+<footer id="footer">
+  <div>Unidades:<b id="st-units">0</b></div>
+  <div>Espesor:<b id="st-total">0.0 m</b></div>
+  <div>Escala:<b id="st-scale">1:500</b></div>
+  <div>Zoom:<b id="st-zoom">100%</b></div>
+  <div id="val-ind"></div>
+</footer>
+
+<!-- ── Export modal ──────────────────────────────────────────────── -->
+<div id="export-modal">
+  <div class="modal-box">
+    <div class="exp-title">Exportar columna</div>
+    <div class="exp-formats">
+      <button class="fmt-pill on" data-fmt="svg"  onclick="setExpFmt('svg')">SVG</button>
+      <button class="fmt-pill"    data-fmt="png"  onclick="setExpFmt('png')">PNG</button>
+      <button class="fmt-pill"    data-fmt="pdf"  onclick="setExpFmt('pdf')">PDF</button>
+      <button class="fmt-pill"    data-fmt="json" onclick="setExpFmt('json')">JSON</button>
+    </div>
+    <div class="f-row">
+      <span class="f-lbl" id="exp-fname-lbl">Archivo:</span>
+      <input id="exp-fname" type="text" placeholder="columna" />
+      <span id="exp-ext" style="font-size:.7rem;color:var(--text-muted);white-space:nowrap">.svg</span>
+    </div>
+    <div class="exp-note" id="exp-note">Imagen vectorial lista para Adobe Illustrator o Inkscape.</div>
+    <div class="modal-btns" style="margin-top:16px">
+      <button class="btn-cancel" onclick="closeExportModal()">Cancelar</button>
+      <button class="btn-save"   onclick="runExport()">Exportar →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Print root (hidden, rendered only @media print) ───────────── -->
+<div id="print-root" style="display:none"></div>
+
+<script>
+'use strict';
+
+// ── Multi-project store ──────────────────────────────────────────
+var store       = null;   // active store reference (var for reassignability)
+var _projects   = [];     // [{ id, store }]
+var _projIdx    = -1;     // active project index
+var _storeUnsub = null;   // subscription cleanup fn
+// Vista activa: false = una columna normal (#body, editor); true = la
+// pestaña FIJA de Correlación estratigráfica (#correlation-view). Ver
+// switchToCorrelation() / _showColumnView(). No es un proyecto de
+// _projects[] — es una vista aparte, siempre presente, no eliminable.
+var _correlationActive = false;
+
+// Slots de la fila de selectores de Correlación. Cada elemento guarda el
+// ID de la columna (proyecto) asignada, o null si el slot está vacío. El
+// valor null de la VARIABLE ENTERA significa "aún sin inicializar": la
+// primera vez que se abre la pestaña se auto-completa 1-a-1 en el orden
+// de creación (un slot por columna). Se guarda el ID —no el índice— para
+// que crear/reordenar/eliminar columnas no rompa la asignación: si el ID
+// ya no existe en _projects, el slot queda "huérfano" y muestra el aviso
+// "Columna eliminada — elige otra" sin desaparecer. Persiste entre
+// cambios de vista (no se resetea al salir y volver a la pestaña).
+var _correlationSlots = null;
+
+// Escala vertical COMPARTIDA de la vista de correlación, en px por metro.
+// null = automática (patrón "auto salvo sobrescritura", igual que el editor
+// de rangos de Schoeller-Berkaloff de Hidrogeoquímica): se deriva de la
+// columna más larga entre las seleccionadas. Un número = valor fijo puesto
+// a mano. NO tiene relación con metadata.scale de cada columna (que es su
+// escala cartográfica propia y no se toca acá): forzar este px/m en el
+// renderer desacopla por completo la vista de correlación de la escala
+// individual de cada columna, que se sigue viendo igual en su pestaña.
+var _corrScaleOverride = null;
+// Alto objetivo (px) que ocupa la columna MÁS LARGA con la escala
+// automática. Las demás quedan proporcionalmente más cortas (mismo px/m).
+var CORR_MAX_H = 680;
+
+// Alineación vertical de la vista de correlación:
+//   false (por defecto) = todas alineadas al TOPE (comportamiento Etapa 4).
+//   true = cada columna se desplaza según su cota del tope (metadata.
+//          topElevation, campo de la Etapa 1), con la MISMA escala px/m
+//          compartida. La columna de mayor cota queda arriba; las de menor
+//          cota bajan (cota_max − cota) · px/m. Una columna SIN cota no se
+//          desplaza (queda al tope) y muestra un aviso, igual espíritu que
+//          el "columna eliminada" de la Etapa 3: no se inventa una cota.
+var _corrAlignByElevation = false;
+
+function _makeProject(meta) {
+  return { id: Math.random().toString(36).slice(2, 9), store: createColumnStore(meta || {}) };
+}
+
+/** Muestra el body de columna (3 paneles) y oculta la vista de correlación. Idempotente. */
+function _showColumnView() {
+  _correlationActive = false;
+  document.getElementById('body').style.display = '';
+  document.getElementById('correlation-view').style.display = 'none';
+}
+
+function _applyProject(idx) {
+  if (_storeUnsub) { _storeUnsub(); _storeUnsub = null; }
+  if (typeof _draft !== 'undefined' && _draft) closeEditor();
+  _showColumnView(); // entrar a una columna siempre sale del modo correlación
+  _projIdx = idx;
+  store    = _projects[idx].store;
+  _storeUnsub = store.subscribe(renderAll);
+  const s = store.getState();
+  document.getElementById('f-col-name').value   = s.column.metadata.name   || '';
+  document.getElementById('f-col-scale').value  = s.column.metadata.scale  || 500;
+  document.getElementById('f-col-author').value = s.column.metadata.author || '';
+  // topElevation opcional: undefined/null ⇒ input vacío (no "0").
+  const te = s.column.metadata.topElevation;
+  document.getElementById('f-col-top-elev').value = (te === undefined || te === null) ? '' : te;
+  // Ubicación GIS (Este/Norte/elevación) — mismo criterio "ausente ⇒ vacío, no 0".
+  const _loc = s.column.metadata.location || {};
+  const _coords = _loc.coordinates || {};
+  const _setNum = (id, v) => { document.getElementById(id).value = (v === undefined || v === null) ? '' : v; };
+  _setNum('f-col-este', _coords.este);
+  _setNum('f-col-norte', _coords.norte);
+  _setNum('f-col-elev', _loc.elevation);
+  initChronoSelectors();
+  renderAll();
+  _renderProjTabs();
+}
+
+function switchToProject(idx) { _applyProject(idx); }
+
+function newProject() {
+  const n = _projects.length + 1;
+  _projects.push(_makeProject({ name: 'Columna ' + n, scale: 500 }));
+  _applyProject(_projects.length - 1);
+}
+
+function closeProject(idx) {
+  if (_projects.length <= 1) return;
+  var deletedId = _projects[idx].id;
+  _projects.splice(idx, 1);
+  // Toda columna eliminada del proyecto deja huérfanos a los slots que la
+  // tenían: se eliminan (con aviso) las líneas ancladas a esos slots.
+  if (_correlationSlots) {
+    _correlationSlots.forEach(function (slot) {
+      if (slot.columnId === deletedId) _corrRemoveLinesForSlot(slot.id, 'Se eliminó una columna asignada');
+    });
+  }
+  _applyProject(Math.min(idx, _projects.length - 1));
+}
+
+/**
+ * Activa la pestaña FIJA de Correlación estratigráfica: oculta el body de
+ * columna y muestra el lienzo de correlación (por ahora un placeholder
+ * apaisado). NO toca _projects/_projIdx ni la suscripción al store activo
+ * — la columna "activa" sigue siéndolo por debajo; solo cambia qué vista
+ * se muestra, así volver a una pestaña de columna la deja igual que estaba.
+ */
+function switchToCorrelation() {
+  if (typeof _draft !== 'undefined' && _draft) closeEditor();
+  _correlationActive = true;
+  document.getElementById('body').style.display = 'none';
+  document.getElementById('correlation-view').style.display = 'flex';
+  document.getElementById('hdr-sub').textContent = 'Correlación estratigráfica';
+  // Listeners de anotaciones (líneas): delegación en el lienzo, una sola vez.
+  if (!_corrHandlersAttached) {
+    var cv = document.getElementById('correlation-canvas');
+    cv.addEventListener('click', _corrCanvasClick);
+    cv.addEventListener('mousedown', _corrCanvasMousedown);
+    cv.addEventListener('dblclick', _corrCanvasDblclick);
+    document.addEventListener('mousemove', _corrDocMousemove);
+    document.addEventListener('mouseup', _corrDocMouseup);
+    document.addEventListener('keydown', _corrKeydown);
+    _corrHandlersAttached = true;
+  }
+  renderCorrelation();
+  _renderProjTabs();
+}
+
+/** Id corto y estable para slots y líneas de correlación. */
+function _corrGenId() { return 'c' + Math.random().toString(36).slice(2, 10); }
+
+/**
+ * Auto-completa los slots la primera vez (uno por columna, en orden de
+ * creación). Idempotente: solo actúa si _correlationSlots aún es null.
+ *
+ * Cada slot es { id, columnId }: `id` es estable (no cambia al reasignar ni
+ * reordenar) y es el ancla de las líneas de correlación (PuntoConectable.slotId),
+ * lo que resuelve la ambigüedad de una misma columna repetida en 2 slots.
+ */
+function _initCorrelationSlots() {
+  if (_correlationSlots === null) {
+    _correlationSlots = _projects.map(function (p) { return { id: _corrGenId(), columnId: p.id }; });
+  }
+}
+
+/** Escapa texto para interpolarlo seguro en innerHTML (nombres de columna). */
+function _escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+/** Nombre de una columna por su ID, o null si ya no existe (huérfano). */
+function _projNameById(id) {
+  var p = _projects.find(function (pr) { return pr.id === id; });
+  return p ? (p.store.getState().column.metadata.name || 'Columna sin nombre') : null;
+}
+
+/**
+ * Reconstruye la fila de selectores. Cada slot es un <select> que lista
+ * TODAS las columnas del proyecto (se permiten repetidos: la misma
+ * columna puede elegirse en varios slots). Si el ID guardado ya no existe,
+ * el slot se marca huérfano: <select> sin selección + aviso en rojo.
+ */
+function renderCorrelation() {
+  _initCorrelationSlots();
+  var cont = document.getElementById('correlation-selectors');
+  if (!cont) return;
+
+  // Opciones comunes a todos los selects: una por columna actual.
+  var optsFor = function (selId) {
+    var opts = '<option value="">— Elegir columna —</option>';
+    _projects.forEach(function (p) {
+      var nm  = p.store.getState().column.metadata.name || 'Columna sin nombre';
+      var sel = (p.id === selId) ? ' selected' : '';
+      opts += '<option value="' + p.id + '"' + sel + '>' + _escapeHtml(nm) + '</option>';
+    });
+    return opts;
+  };
+
+  var html = _correlationSlots.map(function (slot, i) {
+    var id     = slot.columnId;
+    var orphan = id != null && _projNameById(id) === null;
+    var note   = orphan
+      ? '<div class="corr-slot-note">⚠ Columna eliminada — elige otra</div>'
+      : '';
+    // Un slot huérfano deja el <select> sin selección (value ""), porque
+    // el ID muerto ya no está entre las opciones.
+    return '<div class="corr-slot' + (orphan ? ' orphan' : '') + '">'
+      + '<div class="corr-slot-head">'
+      +   '<span class="corr-slot-num">Columna ' + (i + 1) + '</span>'
+      +   '<button class="corr-slot-del" onclick="corrRemoveSlot(' + i + ')" title="Eliminar este selector">✕</button>'
+      + '</div>'
+      + '<select class="corr-slot-sel" onchange="corrSetSlot(' + i + ', this.value)">'
+      +   optsFor(orphan ? null : id)
+      + '</select>'
+      + note
+      + '</div>';
+  }).join('');
+
+  html += '<button class="btn-add-slot" onclick="corrAddSlot()" title="Agregar un selector vacío">+ Selector</button>';
+  cont.innerHTML = html;
+
+  renderCorrelationScalebar();
+  renderCorrelationCanvas();
+}
+
+/**
+ * Slots con columna asignada Y existente, en orden. Cada elemento
+ * { slotId, project } — conserva el slotId para anclar líneas sin ambigüedad
+ * aunque la misma columna se repita en dos slots. Ignora vacíos y huérfanos.
+ */
+function _corrValidSlots() {
+  return _correlationSlots
+    .map(function (slot) {
+      var p = (slot && slot.columnId != null)
+        ? (_projects.find(function (pr) { return pr.id === slot.columnId; }) || null)
+        : null;
+      return p ? { slotId: slot.id, project: p } : null;
+    })
+    .filter(Boolean);
+}
+
+/** Proyectos visibles (mismo orden que _corrValidSlots), para escala/offsets. */
+function _corrValidProjects() {
+  return _corrValidSlots().map(function (vs) { return vs.project; });
+}
+
+/** Espesor total (m) de un proyecto, vía su propio store. */
+function _corrTotalM(p) {
+  var s = p.store.getState();
+  var comp = p.store.calcAccumulatedHeights(s.column.units);
+  return comp.length ? comp[comp.length - 1].heightToTop : 0;
+}
+
+/** px/m automático: hace que la columna MÁS LARGA ocupe CORR_MAX_H. */
+function _corrAutoPxPerM(valid) {
+  var maxM = 0;
+  valid.forEach(function (p) { var t = _corrTotalM(p); if (t > maxM) maxM = t; });
+  if (maxM <= 0) return 12; // sin espesor real: valor neutro (evita /0)
+  return Math.max(6, Math.min(38, CORR_MAX_H / maxM));
+}
+
+/** px/m efectivo: el override manual si existe, si no el automático. */
+function _corrEffectivePxPerM(valid) {
+  return _corrScaleOverride != null ? _corrScaleOverride : _corrAutoPxPerM(valid);
+}
+
+/**
+ * Barra de escala compartida. Visible solo si hay columnas que graficar.
+ * El input muestra el px/m efectivo; escribir un número lo fija (override);
+ * "Auto" limpia el override y vuelve al valor derivado de la más larga.
+ */
+function renderCorrelationScalebar() {
+  var bar = document.getElementById('correlation-scalebar');
+  if (!bar) return;
+  var valid = _corrValidProjects();
+  if (valid.length === 0) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+
+  var eff    = _corrEffectivePxPerM(valid);
+  var isAuto = _corrScaleOverride == null;
+  bar.style.display = 'flex';
+  bar.innerHTML =
+      '<span class="corr-scale-lbl">Escala compartida</span>'
+    + '<input type="number" step="any" min="1" value="' + eff.toFixed(2)
+    +   '" onchange="corrSetScale(this.value)" title="Píxeles por metro, compartido por todas las columnas">'
+    + '<span>px/m</span>'
+    + (isAuto
+        ? '<span class="corr-scale-auto">(auto — columna más larga)</span>'
+        : '<button class="btn-scale-reset" onclick="corrResetScale()" title="Volver a la escala automática">Auto</button>')
+    + '<label class="corr-align-toggle" title="Desplaza cada columna según su cota del tope, con la misma escala compartida">'
+    +   '<input type="checkbox"' + (_corrAlignByElevation ? ' checked' : '')
+    +     ' onchange="corrToggleAlign(this.checked)"> Alinear por elevación real'
+    + '</label>'
+    // ── Herramientas del lienzo ──────────────────────────────────────
+    + '<span class="corr-tool-group">'
+    +   '<button class="corr-tool-btn' + (_corrTool === 'select' ? ' active' : '') + '"'
+    +     ' onclick="corrSetTool(\'select\')" title="Seleccionar (sin marcadores)">Selección</button>'
+    +   '<button class="corr-tool-btn' + (_corrTool === 'line' ? ' active' : '') + '"'
+    +     ' onclick="corrSetTool(\'line\')" title="Trazar líneas de correlación (2 clics)">Línea</button>'
+    +   '<button class="corr-tool-btn' + (_corrTool === 'text' ? ' active' : '') + '"'
+    +     ' onclick="corrSetTool(\'text\')" title="Crear cuadros de texto (clic en el lienzo)">Texto</button>'
+    + '</span>'
+    + (_corrTool === 'line'
+        ? '<span class="corr-tool-hint">' + (_corrPendingPoint
+            ? 'Elige el punto de destino (Esc para cancelar)'
+            : 'Clic en un punto de origen') + '</span>'
+        : '')
+    + (_corrTool === 'text'
+        ? '<span class="corr-tool-hint">Clic en el lienzo para crear un cuadro de texto</span>'
+        : '');
+}
+
+/** Activa/desactiva la alineación por cota del tope. */
+function corrToggleAlign(on) {
+  _corrAlignByElevation = !!on;
+  renderCorrelation();
+}
+
+/** Fija el override de escala (número positivo) o lo ignora si es inválido. */
+function corrSetScale(value) {
+  var v = parseFloat(value);
+  if (Number.isFinite(v) && v > 0) _corrScaleOverride = v;
+  renderCorrelation();
+}
+
+/** Vuelve a la escala automática (derivada de la columna más larga). */
+function corrResetScale() {
+  _corrScaleOverride = null;
+  renderCorrelation();
+}
+
+// Placeholder original del lienzo (cuando no hay columnas asignadas).
+var _CORR_PLACEHOLDER =
+    '<div class="corr-placeholder">'
+  +   '<div class="corr-ph-icon">↔</div>'
+  +   '<div class="corr-ph-title">Correlación estratigráfica</div>'
+  +   '<div class="corr-ph-sub">Asigna columnas en los selectores de arriba para verlas lado a lado, con escala vertical compartida.</div>'
+  + '</div>';
+
+// Separación horizontal entre columnas dentro del lienzo compartido (px).
+var CORR_COL_GAP = 24;
+// Franja reservada arriba de una columna SIN cota para su aviso (px).
+var CORR_BADGE_H = 16;
+
+// ── Estado de anotaciones sobre el lienzo (líneas de correlación) ─────
+var _corrTool = 'select';                 // 'select' | 'line' | 'text'
+var _corrPendingPoint = null;             // PuntoConectable a la espera de destino (trazado en curso)
+var _corrLines = [];                       // LineaCorrelacion[] { id, from, to, color, thickness } — en memoria
+var _corrSelectedLineId = null;            // id de la línea con el menú de edición abierto (modo Selección)
+var _corrHandlersAttached = false;         // los listeners del lienzo se enganchan una sola vez
+var CORR_LINE_DEFAULT_COLOR = '#e11d48';   // color por defecto de una línea recién creada
+var CORR_LINE_DEFAULT_THICKNESS = 2;       // grosor (px) por defecto — igual al fijo histórico, así las líneas viejas (sin `thickness`) no cambian
+var CORR_LINE_MIN_THICKNESS = 1, CORR_LINE_MAX_THICKNESS = 8;
+/** Grosor efectivo de una línea (default si nunca se editó / proyecto viejo). */
+function _corrLineThickness(ln) { return (ln && typeof ln.thickness === 'number') ? ln.thickness : CORR_LINE_DEFAULT_THICKNESS; }
+
+// ── Cuadros de texto (anotaciones libres sobre el lienzo) ─────────────
+var _corrTextBoxes = [];                    // { id, x, y, text, fontSize, rotation, color } — coords del lienzo, no ancladas a geología
+var _corrSelectedTextId = null;             // id del cuadro con panel de controles/edición abierto
+var _corrDrag = null;                       // { id, startX, startY, boxX, boxY } mientras se arrastra un cuadro
+var _corrDidDrag = false;                   // true si el último mousedown derivó en arrastre (suprime el click posterior)
+var CORR_TEXT_DEFAULT = { text: 'Texto', fontSize: 14, rotation: 0, color: '#1e293b' };
+
+/** Cambia la herramienta activa; cancela trazado en curso y cierra los menús. */
+function corrSetTool(tool) {
+  _corrTool = tool;
+  _corrPendingPoint = null;
+  var lm = document.getElementById('corr-line-menu');   if (lm) lm.style.display = 'none';
+  var tm = document.getElementById('corr-text-menu');   if (tm) tm.style.display = 'none';
+  var te = document.getElementById('corr-text-edit');   if (te) te.style.display = 'none';
+  _corrSelectedLineId = null;
+  _corrSelectedTextId = null;
+  renderCorrelation();
+}
+
+/**
+ * Clic en el lienzo, con la herramienta Línea activa (delegación de eventos —
+ * el <svg> se reconstruye en cada render, pero este listener vive en
+ * #correlation-canvas, que persiste). Mecanismo de DOS clics:
+ *   1er clic en un marcador → queda "esperando destino" (marcador resaltado).
+ *   2do clic en otro marcador → traza la línea (from→to) con color por defecto.
+ *   Clic en área vacía → cancela el trazado en curso.
+ * Se permiten múltiples líneas al mismo punto y entre slots no adyacentes.
+ */
+function _corrCanvasClick(ev) {
+  if (!_correlationActive) return;
+  // Un arrastre de cuadro acaba de terminar → suprime el click posterior.
+  if (_corrDidDrag) { _corrDidDrag = false; return; }
+
+  // ── Modo Selección ─────────────────────────────────────────────────
+  if (_corrTool === 'select') {
+    if (ev.target.closest && ev.target.closest('[data-corr-textbox]')) return; // cuadros: mousedown/mouseup
+    var lineEl = ev.target.closest ? ev.target.closest('[data-corr-line]') : null;
+    if (lineEl) { _corrOpenLineMenu(lineEl.getAttribute('data-corr-line'), ev.clientX, ev.clientY); return; }
+    _corrCloseLineMenu(); _corrCloseTextMenu();     // clic en vacío → cierra ambos menús
+    return;
+  }
+
+  // ── Modo Texto: clic en vacío (no marcador ni línea) → crea un cuadro ──
+  if (_corrTool === 'text') {
+    if (ev.target.closest && (ev.target.closest('[data-corr-line]') || ev.target.closest('[data-corr-marker]'))) return;
+    var svg = document.querySelector('#correlation-canvas svg');
+    if (!svg) return;
+    var sr = svg.getBoundingClientRect();
+    var nb = {
+      id: _corrGenId(), x: ev.clientX - sr.left, y: ev.clientY - sr.top,
+      text: CORR_TEXT_DEFAULT.text, fontSize: CORR_TEXT_DEFAULT.fontSize,
+      rotation: CORR_TEXT_DEFAULT.rotation, color: CORR_TEXT_DEFAULT.color,
+    };
+    _corrTextBoxes.push(nb);
+    renderCorrelationCanvas();
+    _corrEditTextBox(nb.id, ev.clientX, ev.clientY);  // editable de inmediato
+    return;
+  }
+
+  if (_corrTool !== 'line') return;
+  var m = ev.target.closest ? ev.target.closest('[data-corr-marker]') : null;
+  if (m) {
+    var pt = {
+      slotId: m.getAttribute('data-slot'), unitId: m.getAttribute('data-unit'),
+      edge:   m.getAttribute('data-edge'), side:   m.getAttribute('data-side'),
+    };
+    if (!_corrPendingPoint) {
+      _corrPendingPoint = pt;                       // origen
+    } else if (!_corrSamePoint(_corrPendingPoint, pt)) {
+      _corrLines.push({ id: _corrGenId(), from: _corrPendingPoint, to: pt, color: CORR_LINE_DEFAULT_COLOR, thickness: CORR_LINE_DEFAULT_THICKNESS });
+      _corrPendingPoint = null;                     // destino → línea creada
+    }                                               // mismo punto exacto: se ignora (no traza línea de largo 0)
+    renderCorrelation();                            // canvas + barra (hint origen/destino)
+    return;
+  }
+  if (_corrPendingPoint) { _corrPendingPoint = null; renderCorrelation(); } // clic en vacío → cancela
+}
+
+/** Escape cancela el trazado en curso (línea) o cierra el menú (selección). */
+function _corrKeydown(ev) {
+  if (!_correlationActive || ev.key !== 'Escape') return;
+  if (_corrTool === 'line' && _corrPendingPoint) {
+    _corrPendingPoint = null;
+    renderCorrelation();
+  } else if (_corrTool === 'select') {
+    if (_corrSelectedLineId !== null) _corrCloseLineMenu();
+    if (_corrSelectedTextId !== null) _corrCloseTextMenu();
+  }
+}
+
+/**
+ * Abre el menú flotante de una línea (color + eliminar) junto al clic, y
+ * resalta la línea seleccionada. El menú es HTML posicionado con position:fixed
+ * en coordenadas del viewport del iframe (mismas que ev.clientX/Y).
+ */
+function _corrOpenLineMenu(id, clientX, clientY) {
+  var ln = _corrLines.find(function (l) { return l.id === id; });
+  if (!ln) return;
+  // Al seleccionar una línea, deselecciona cualquier cuadro de texto.
+  var tmEl = document.getElementById('corr-text-menu'); if (tmEl) tmEl.style.display = 'none';
+  var teEl = document.getElementById('corr-text-edit'); if (teEl) teEl.style.display = 'none';
+  _corrSelectedTextId = null;
+  _corrSelectedLineId = id;
+  var menu  = document.getElementById('corr-line-menu');
+  var input = document.getElementById('corr-line-color');
+  if (input) input.value = ln.color;
+  var thick = document.getElementById('corr-line-thickness');
+  var thickVal = document.getElementById('corr-line-thickness-val');
+  var t = _corrLineThickness(ln);
+  if (thick) thick.value = t;
+  if (thickVal) thickVal.textContent = t;
+  if (menu) {
+    menu.style.left = (clientX + 8) + 'px';
+    menu.style.top  = (clientY + 8) + 'px';
+    menu.style.display = 'flex';
+  }
+  renderCorrelationCanvas(); // dibuja el halo de selección
+}
+
+/** Cierra el menú de línea y quita el resaltado. */
+function _corrCloseLineMenu() {
+  var menu = document.getElementById('corr-line-menu');
+  if (menu) menu.style.display = 'none';
+  if (_corrSelectedLineId !== null) { _corrSelectedLineId = null; renderCorrelationCanvas(); }
+}
+
+/** Cambia el color de la línea seleccionada (en vivo, sin cerrar el menú). */
+function corrSetLineColor(color) {
+  var ln = _corrLines.find(function (l) { return l.id === _corrSelectedLineId; });
+  if (ln) { ln.color = color; renderCorrelationCanvas(); }
+}
+
+/** Cambia el grosor (px) de la línea seleccionada — en vivo, por línea. */
+function corrSetLineThickness(value) {
+  var ln = _corrLines.find(function (l) { return l.id === _corrSelectedLineId; });
+  if (!ln) return;
+  var t = parseFloat(value);
+  if (isNaN(t)) return;
+  ln.thickness = Math.min(CORR_LINE_MAX_THICKNESS, Math.max(CORR_LINE_MIN_THICKNESS, t));
+  var thickVal = document.getElementById('corr-line-thickness-val');
+  if (thickVal) thickVal.textContent = ln.thickness;
+  renderCorrelationCanvas();
+}
+
+/** Elimina la línea seleccionada y cierra el menú. */
+function corrDeleteSelectedLine() {
+  _corrLines = _corrLines.filter(function (l) { return l.id !== _corrSelectedLineId; });
+  _corrCloseLineMenu();
+}
+
+/**
+ * Elimina todas las líneas ancladas a un slot (por cualquiera de sus dos
+ * extremos) y avisa al usuario si borró alguna. Se usa cuando un slot deja
+ * de referirse a la misma columna (reasignación) o su columna se elimina del
+ * proyecto — sus unitId ya no son válidos, así que la línea no puede seguir.
+ * Los cuadros de texto NO se tocan (no dependen de slots).
+ * @returns {number} cantidad de líneas eliminadas
+ */
+function _corrRemoveLinesForSlot(slotId, reasonMsg) {
+  var before = _corrLines.length;
+  _corrLines = _corrLines.filter(function (l) {
+    return l.from.slotId !== slotId && l.to.slotId !== slotId;
+  });
+  var removed = before - _corrLines.length;
+  if (removed > 0) {
+    // Si la línea con menú abierto fue una de las borradas, cierra el menú.
+    if (_corrSelectedLineId && !_corrLines.some(function (l) { return l.id === _corrSelectedLineId; })) {
+      _corrSelectedLineId = null;
+      var lm = document.getElementById('corr-line-menu'); if (lm) lm.style.display = 'none';
+    }
+    _corrShowNotice(reasonMsg + ': se ' + (removed === 1
+      ? 'eliminó 1 línea de correlación anclada a ese selector.'
+      : 'eliminaron ' + removed + ' líneas de correlación ancladas a ese selector.'));
+  }
+  return removed;
+}
+
+var _corrNoticeTimer = null;
+/** Aviso transitorio (toast) sobre el módulo — visible en cualquier vista. */
+function _corrShowNotice(msg) {
+  var el = document.getElementById('corr-notice');
+  if (!el) return;
+  el.textContent = '⚠ ' + msg;
+  el.style.display = 'block';
+  if (_corrNoticeTimer) clearTimeout(_corrNoticeTimer);
+  _corrNoticeTimer = setTimeout(function () { el.style.display = 'none'; }, 5000);
+}
+
+/**
+ * ¿Un PuntoConectable resuelve a nivel de DATOS? (sin necesitar el layout de
+ * píxeles): el slot existe, tiene columna asignada, esa columna existe y la
+ * unidad sigue en ella. Se usa al cargar para podar líneas rotas.
+ */
+function _corrPointResolvableData(pt) {
+  var slot = _correlationSlots && _correlationSlots.find(function (s) { return s.id === pt.slotId; });
+  if (!slot || slot.columnId == null) return false;
+  var p = _projects.find(function (pr) { return pr.id === slot.columnId; });
+  if (!p) return false;
+  return p.store.getState().column.units.some(function (u) { return u.id === pt.unitId; });
+}
+
+/** Poda líneas cuyos extremos ya no resuelven (tras cargar un proyecto). */
+function _corrPruneLines() {
+  var before = _corrLines.length;
+  _corrLines = _corrLines.filter(function (l) {
+    return _corrPointResolvableData(l.from) && _corrPointResolvableData(l.to);
+  });
+  return before - _corrLines.length;
+}
+
+// ── Cuadros de texto: arrastre, selección, edición y controles ────────
+
+/** Cuadro de texto seleccionado (o null). */
+function _corrSelText() { return _corrTextBoxes.find(function (b) { return b.id === _corrSelectedTextId; }); }
+
+/**
+ * Modo Selección: mousedown sobre un cuadro inicia un arrastre candidato.
+ * Si el puntero se mueve más allá de un umbral → arrastre real (mueve el
+ * cuadro); si no → en mouseup se interpreta como clic-selección (abre panel).
+ */
+function _corrCanvasMousedown(ev) {
+  if (!_correlationActive || _corrTool !== 'select') return;
+  var g = ev.target.closest ? ev.target.closest('[data-corr-textbox]') : null;
+  if (!g) return;
+  var id = g.getAttribute('data-corr-textbox');
+  var box = _corrTextBoxes.find(function (b) { return b.id === id; });
+  if (!box) return;
+  ev.preventDefault(); // evita selección de texto nativa al arrastrar
+  _corrDrag = { id: id, startX: ev.clientX, startY: ev.clientY, boxX: box.x, boxY: box.y };
+  _corrDidDrag = false;
+}
+
+/** Mueve el cuadro en curso (1 px pantalla = 1 unidad del lienzo, sin escalar). */
+function _corrDocMousemove(ev) {
+  if (!_corrDrag) return;
+  var dx = ev.clientX - _corrDrag.startX, dy = ev.clientY - _corrDrag.startY;
+  if (!_corrDidDrag && (Math.abs(dx) + Math.abs(dy)) < 3) return; // umbral clic vs arrastre
+  _corrDidDrag = true;
+  var box = _corrTextBoxes.find(function (b) { return b.id === _corrDrag.id; });
+  if (!box) return;
+  box.x = _corrDrag.boxX + dx;
+  box.y = _corrDrag.boxY + dy;
+  renderCorrelationCanvas();
+}
+
+/** Fin del arrastre; si no hubo movimiento, es un clic-selección del cuadro. */
+function _corrDocMouseup(ev) {
+  if (!_corrDrag) return;
+  var wasDrag = _corrDidDrag, id = _corrDrag.id;
+  _corrDrag = null;
+  if (!wasDrag) _corrOpenTextMenu(id, ev.clientX, ev.clientY);
+  // si fue arrastre, _corrDidDrag queda true y el click siguiente lo consume
+}
+
+/** Doble clic sobre un cuadro (modo Selección) → editar su contenido. */
+function _corrCanvasDblclick(ev) {
+  if (!_correlationActive || _corrTool !== 'select') return;
+  var g = ev.target.closest ? ev.target.closest('[data-corr-textbox]') : null;
+  if (g) _corrEditTextBox(g.getAttribute('data-corr-textbox'), ev.clientX, ev.clientY);
+}
+
+/** Abre el input de edición de contenido junto al cuadro (position:fixed). */
+function _corrEditTextBox(id, clientX, clientY) {
+  var box = _corrTextBoxes.find(function (b) { return b.id === id; });
+  if (!box) return;
+  var menu = document.getElementById('corr-text-menu'); if (menu) menu.style.display = 'none';
+  _corrSelectedTextId = id;
+  var inp = document.getElementById('corr-text-edit');
+  inp.value = box.text;
+  inp.setAttribute('data-editing', id);
+  inp.style.left = (clientX + 8) + 'px';
+  inp.style.top  = (clientY + 8) + 'px';
+  inp.style.display = 'block';
+  inp.focus(); inp.select();
+  renderCorrelationCanvas();
+}
+
+/** Edición en vivo del contenido del cuadro. */
+function corrEditTextInput(v) {
+  var id = document.getElementById('corr-text-edit').getAttribute('data-editing');
+  var box = _corrTextBoxes.find(function (b) { return b.id === id; });
+  if (box) { box.text = v; renderCorrelationCanvas(); }
+}
+
+/** Cierra el input de edición de contenido. */
+function corrEditTextEnd() {
+  var inp = document.getElementById('corr-text-edit');
+  inp.style.display = 'none';
+  inp.setAttribute('data-editing', '');
+}
+
+/** Abre el panel de controles del cuadro (tamaño, color, rotación, eliminar). */
+function _corrOpenTextMenu(id, clientX, clientY) {
+  var box = _corrTextBoxes.find(function (b) { return b.id === id; });
+  if (!box) return;
+  _corrCloseLineMenu(); // no mezclar con el menú de línea
+  _corrSelectedTextId = id;
+  document.getElementById('corr-text-size').value    = box.fontSize;
+  document.getElementById('corr-text-color').value   = box.color;
+  document.getElementById('corr-text-rot').value     = box.rotation;
+  document.getElementById('corr-text-rot-num').value = box.rotation;
+  var menu = document.getElementById('corr-text-menu');
+  menu.style.left = (clientX + 8) + 'px';
+  menu.style.top  = (clientY + 8) + 'px';
+  menu.style.display = 'flex';
+  renderCorrelationCanvas(); // resalta el cuadro seleccionado
+}
+
+/** Cierra el panel de controles del cuadro y quita el resaltado. */
+function _corrCloseTextMenu() {
+  var menu = document.getElementById('corr-text-menu'); if (menu) menu.style.display = 'none';
+  if (_corrSelectedTextId !== null) { _corrSelectedTextId = null; renderCorrelationCanvas(); }
+}
+
+/** Tamaño de letra del cuadro seleccionado (mínimo 6 px). */
+function corrSetTextSize(v) {
+  var b = _corrSelText(); if (!b) return;
+  var n = parseFloat(v); if (Number.isFinite(n)) { b.fontSize = Math.max(6, n); renderCorrelationCanvas(); }
+}
+
+/** Color del cuadro seleccionado. */
+function corrSetTextColor(v) {
+  var b = _corrSelText(); if (b) { b.color = v; renderCorrelationCanvas(); }
+}
+
+/** Rotación 0–360° del cuadro seleccionado (mantiene sincronizados slider e input). */
+function corrSetTextRotation(v) {
+  var b = _corrSelText(); if (!b) return;
+  var r = ((parseFloat(v) || 0) % 360 + 360) % 360;
+  b.rotation = r;
+  document.getElementById('corr-text-rot').value     = r;
+  document.getElementById('corr-text-rot-num').value = r;
+  renderCorrelationCanvas();
+}
+
+/** Atajos rápidos de rotación: Horizontal (0°) / Vertical (90°). */
+function corrTextRotationPreset(deg) { corrSetTextRotation(deg); }
+
+/** Elimina el cuadro seleccionado y cierra el panel. */
+function corrDeleteSelectedText() {
+  _corrTextBoxes = _corrTextBoxes.filter(function (b) { return b.id !== _corrSelectedTextId; });
+  _corrCloseTextMenu();
+}
+
+/**
+ * Calcula la disposición de todas las columnas visibles dentro de UN lienzo
+ * compartido: la posición (x, y) de cada una y la caja envolvente total.
+ *
+ * - x: acumulado de izquierda a derecha (ancho fijo por columna + gap).
+ * - y del contenido: el desfase de elevación de la columna (0 si el toggle
+ *   está apagado o es la de mayor cota) MÁS la franja de aviso si no tiene
+ *   cota (para que el aviso quepa arriba sin pisar el título).
+ * - caja envolvente: ancho = suma de columnas + gaps; alto = el punto más
+ *   bajo entre todas (max(y_contenido + alto)). El tope es 0 porque el
+ *   desfase mínimo siempre es 0 (la columna de mayor cota, o todas cuando el
+ *   toggle está apagado). Así el rectángulo blanco va del punto más alto al
+ *   más bajo entre TODAS las columnas, no del alto de una sola.
+ *
+ * @returns {{cols: Array, totalWidth: number, totalHeight: number}}
+ */
+function computeCorrelationLayout(validSlots, pxPerM, offsets) {
+  var cols = [];
+  var x = 0;
+  var maxBottom = 0;
+  validSlots.forEach(function (vs, i) {
+    var p        = vs.project;
+    var s        = p.store.getState();
+    var computed = p.store.calcAccumulatedHeights(s.column.units);
+    var ps       = Object.assign({}, s, { computed: computed });
+    // asContent → contenido desnudo + geometría de anclaje para incrustar como <g>.
+    // pxPerMeter forzado = escala compartida; maxDrawH alto para que el clamp
+    // interno no recorte con overrides grandes. Los puntos de quiebre (~) y
+    // demás símbolos de contacto vienen dentro de `content`, así que se
+    // replican solos donde cada columna ya los tenía.
+    var r = renderColumnSVG(ps, { geoConfig: GEO_SYMBOLS, pxPerMeter: pxPerM, maxDrawH: 100000, asContent: true });
+    var noCota   = _corrAlignByElevation && _corrTopElevation(p) === null;
+    var badgeTop = offsets[i];                       // tope del bloque (donde va el aviso, si aplica)
+    var contentY = offsets[i] + (noCota ? CORR_BADGE_H : 0);
+    cols.push({
+      slotId: vs.slotId, content: r.content, x: x, contentY: contentY, badgeY: badgeTop,
+      width: r.width, height: r.height, noCota: noCota,
+      barLeft: r.barLeft, barRight: r.barRight, units: r.units, // geometría de anclaje
+    });
+    maxBottom = Math.max(maxBottom, contentY + r.height);
+    x += r.width + CORR_COL_GAP;
+  });
+  return { cols: cols, totalWidth: Math.max(0, x - CORR_COL_GAP), totalHeight: maxBottom };
+}
+
+/** ¿Dos PuntoConectable apuntan al mismo lugar? (slot+unidad+borde+lado) */
+function _corrSamePoint(a, b) {
+  return !!a && !!b && a.slotId === b.slotId && a.unitId === b.unitId
+    && a.edge === b.edge && a.side === b.side;
+}
+
+/**
+ * Resuelve un PuntoConectable a un píxel (x, y) EN EL LIENZO COMPARTIDO usando
+ * el layout vivo — por eso una línea sigue sus puntos ante cualquier cambio de
+ * escala, alineación o reordenamiento. Devuelve null si el ancla ya no existe
+ * (slot reasignado/eliminado, o unidad ausente), y quien dibuja simplemente la
+ * omite (robustez defensiva; la limpieza con aviso es la sub-etapa 4).
+ */
+function _resolveCorrPoint(layout, point) {
+  var col = layout.cols.find(function (c) { return c.slotId === point.slotId; });
+  if (!col) return null;
+  var u = col.units.find(function (uu) { return uu.unitId === point.unitId; });
+  if (!u) return null;
+  return {
+    x: col.x + (point.side === 'left' ? col.barLeft : col.barRight),
+    y: col.contentY + (point.edge === 'top' ? u.topY : u.bottomY),
+  };
+}
+
+/**
+ * Contactos conectables de una columna del layout: la BASE (borde inferior de
+ * la unidad más baja) + el TECHO de cada unidad. Devuelve, por contacto,
+ * { unitId, edge, y } con y LOCAL (sin el contentY de la columna). Cada
+ * contacto interno aparece UNA vez (como techo de la unidad inferior).
+ */
+function _corrColContacts(col) {
+  if (!col.units.length) return [];
+  var out = [{ unitId: col.units[0].unitId, edge: 'bottom', y: col.units[0].bottomY }];
+  col.units.forEach(function (u) { out.push({ unitId: u.unitId, edge: 'top', y: u.topY }); });
+  return out;
+}
+
+/**
+ * Dibuja todas las columnas de litología en UN solo lienzo <svg> compartido,
+ * con la MISMA escala vertical (mismo px/m) y un único <rect> de fondo blanco
+ * continuo que envuelve la caja envolvente de todas (barra + etiquetas),
+ * incluyendo el desfase de elevación si el toggle está activo. Reutiliza
+ * renderColumnSVG en modo asContent (sin forzar la escala propia de cada
+ * columna ni tocar su estado, así su pestaña individual se sigue viendo igual).
+ */
+function renderCorrelationCanvas() {
+  var canvas = document.getElementById('correlation-canvas');
+  if (!canvas) return;
+  var validSlots = _corrValidSlots();
+  if (validSlots.length === 0) { canvas.innerHTML = _CORR_PLACEHOLDER; return; }
+
+  var valid   = validSlots.map(function (vs) { return vs.project; });
+  var pxPerM  = _corrEffectivePxPerM(valid);
+  var offsets = _corrElevationOffsets(valid, pxPerM);
+  var layout  = computeCorrelationLayout(validSlots, pxPerM, offsets);
+  var W = layout.totalWidth.toFixed(1);
+  var H = layout.totalHeight.toFixed(1);
+
+  var svg = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  svg += GEO_SYMBOLS.getSVGDefs();                 // <defs> de patrones UNA sola vez
+  svg += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"/>'; // fondo blanco ÚNICO y continuo
+  layout.cols.forEach(function (c) {
+    if (c.noCota) {
+      svg += '<text x="' + (c.x + 4) + '" y="' + (c.badgeY + 11).toFixed(1) + '"'
+        + ' font-family="monospace" font-size="9" fill="#f59e0b">⚠ Sin cota — sin desplazar</text>';
+    }
+    svg += '<g transform="translate(' + c.x + ',' + c.contentY.toFixed(1) + ')">' + c.content + '</g>';
+  });
+
+  // ── Líneas de correlación (sobre las columnas) ─────────────────────
+  // Cada extremo se resuelve en vivo; si un ancla ya no existe, se omite.
+  // Por línea se dibujan hasta 3 trazos: (1) halo si está seleccionada,
+  // (2) la línea visible, (3) una línea de "hit" transparente y ancha que
+  // facilita el clic en modo Selección (data-corr-line la identifica).
+  _corrLines.forEach(function (ln) {
+    var a = _resolveCorrPoint(layout, ln.from);
+    var b = _resolveCorrPoint(layout, ln.to);
+    if (!a || !b) return;
+    var coords = 'x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1)
+      + '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) + '"';
+    var tw = _corrLineThickness(ln);
+    if (ln.id === _corrSelectedLineId) {
+      // Halo de selección: siempre más ancho que la línea visible para que
+      // se vea alrededor incluso con el grosor máximo.
+      svg += '<line ' + coords + ' stroke="#22d3ee" stroke-width="' + (tw + 5) + '" stroke-opacity="0.45" stroke-linecap="round" pointer-events="none"/>';
+    }
+    svg += '<line ' + coords + ' stroke="' + ln.color + '" stroke-width="' + tw + '" stroke-linecap="round" pointer-events="none"/>';
+    // Zona de "hit" transparente: al menos 12 px, y siempre más ancha que la
+    // línea visible, para que una línea gruesa siga siendo fácil de seleccionar.
+    svg += '<line data-corr-line="' + ln.id + '" ' + coords + ' stroke="transparent" stroke-width="' + Math.max(12, tw + 6) + '" pointer-events="stroke"/>';
+  });
+
+  // ── Marcadores de puntos conectables (solo con la herramienta Línea) ──
+  if (_corrTool === 'line') {
+    layout.cols.forEach(function (c) {
+      var contacts = _corrColContacts(c);
+      ['left', 'right'].forEach(function (side) {
+        var xEdge = c.x + (side === 'left' ? c.barLeft : c.barRight);
+        contacts.forEach(function (ct) {
+          var pt = { slotId: c.slotId, unitId: ct.unitId, edge: ct.edge, side: side };
+          var pending = _corrSamePoint(_corrPendingPoint, pt);
+          svg += '<circle class="corr-marker' + (pending ? ' pending' : '') + '"'
+            + ' data-corr-marker="1" data-slot="' + c.slotId + '" data-unit="' + ct.unitId + '"'
+            + ' data-edge="' + ct.edge + '" data-side="' + side + '"'
+            + ' cx="' + xEdge.toFixed(1) + '" cy="' + (c.contentY + ct.y).toFixed(1) + '"'
+            + ' r="' + (pending ? 6 : 4.5) + '"/>';
+        });
+      });
+    });
+  }
+
+  // ── Cuadros de texto (anotaciones, siempre encima) ─────────────────
+  // Posición libre en coords del lienzo; rotan sobre su origen (x,y). El
+  // <rect> transparente es la zona de arrastre/clic (todo el cuadro, no solo
+  // los glifos); al estar seleccionado se marca con un contorno punteado.
+  _corrTextBoxes.forEach(function (tb) {
+    var w = Math.max(16, tb.text.length * tb.fontSize * 0.62); // ancho estimado (monospace)
+    var h = tb.fontSize * 1.3;
+    var sel = tb.id === _corrSelectedTextId;
+    svg += '<g data-corr-textbox="' + tb.id + '" transform="translate(' + tb.x.toFixed(1) + ',' + tb.y.toFixed(1) + ') rotate(' + tb.rotation + ')" style="cursor:move">'
+      + '<rect x="-3" y="-3" width="' + (w + 6).toFixed(1) + '" height="' + (h + 6).toFixed(1) + '" fill="transparent" pointer-events="all"'
+      +   (sel ? ' stroke="#22d3ee" stroke-width="1" stroke-dasharray="4 3"' : '') + '/>'
+      + '<text x="0" y="0" dominant-baseline="hanging" font-family="monospace" font-size="' + tb.fontSize + '" fill="' + tb.color + '" pointer-events="none">'
+      +   _escapeHtml(tb.text) + '</text>'
+      + '</g>';
+  });
+
+  svg += '</svg>';
+  canvas.innerHTML = svg;
+}
+
+/** Cota del tope (m) de un proyecto, o null si no está configurada. */
+function _corrTopElevation(p) {
+  var te = p.store.getState().column.metadata.topElevation;
+  return (typeof te === 'number' && isFinite(te)) ? te : null;
+}
+
+/**
+ * Desplazamiento vertical (px) de cada columna válida, en el orden de
+ * `valid`. Con el toggle apagado → todos 0 (alineación al tope). Con el
+ * toggle encendido → (cota_max − cota) · px/m: la de mayor cota queda
+ * arriba (0) y las demás bajan en proporción a su diferencia de cota, con
+ * la misma escala compartida. Una columna sin cota no se desplaza (0) y se
+ * avisa aparte (ver badge en renderCorrelationCanvas).
+ */
+function _corrElevationOffsets(valid, pxPerM) {
+  if (!_corrAlignByElevation) return valid.map(function () { return 0; });
+  var cotas = valid.map(_corrTopElevation);
+  var conCota = cotas.filter(function (c) { return c !== null; });
+  if (conCota.length === 0) return valid.map(function () { return 0; }); // nadie tiene cota
+  var maxCota = Math.max.apply(null, conCota);
+  return cotas.map(function (c) {
+    return c === null ? 0 : (maxCota - c) * pxPerM;
+  });
+}
+
+/** Asigna (o vacía, con value "") la columna de un slot; conserva su id. */
+function corrSetSlot(i, value) {
+  if (i < 0 || i >= _correlationSlots.length) return;
+  var slot = _correlationSlots[i];
+  var newCol = (value === '') ? null : value;
+  // Si la columna del slot CAMBIA, sus unitId dejan de ser válidos: se
+  // eliminan (con aviso) las líneas ancladas a ese slot. Reasignar a la
+  // misma columna no borra nada.
+  if (slot.columnId !== newCol) {
+    _corrRemoveLinesForSlot(slot.id, 'Cambió la columna del selector');
+  }
+  slot.columnId = newCol;
+  renderCorrelation();
+}
+
+/** Agrega un slot nuevo, vacío (sin auto-asignar ninguna columna). */
+function corrAddSlot() {
+  _correlationSlots.push({ id: _corrGenId(), columnId: null });
+  renderCorrelation();
+}
+
+/** Elimina un slot (y las líneas ancladas a él, con aviso). */
+function corrRemoveSlot(i) {
+  if (i < 0 || i >= _correlationSlots.length) return;
+  _corrRemoveLinesForSlot(_correlationSlots[i].id, 'Se quitó un selector');
+  _correlationSlots.splice(i, 1);
+  renderCorrelation();
+}
+
+function _renderProjTabs() {
+  const cont = document.getElementById('proj-tabs');
+  if (!cont) return;
+  var colTabs = _projects.map(function(p, i) {
+    // Una pestaña de columna está activa solo si es el proyecto activo Y
+    // NO estamos en la vista de correlación (que no marca ninguna columna).
+    var name     = p.store.getState().column.metadata.name || ('Columna ' + (i + 1));
+    var act      = i === _projIdx && !_correlationActive;
+    var canClose = _projects.length > 1;
+    var closeBtn = canClose
+      ? '<button class="proj-tab-close" onclick="event.stopPropagation();closeProject(' + i + ')" title="Cerrar">✕</button>'
+      : '';
+    return '<div class="proj-tab' + (act ? ' active' : '') + '" onclick="switchToProject(' + i + ')">'
+      + '<span class="proj-tab-name" title="' + name + '">' + name + '</span>'
+      + closeBtn + '</div>';
+  }).join('');
+
+  // Pestaña FIJA de Correlación — siempre el último elemento, a la derecha
+  // de todas las columnas. Sin ✕ (no eliminable) y sin doble clic para
+  // renombrar (nombre fijo). Se re-renderiza junto con las de columna, así
+  // que crear/eliminar columnas nunca la desplaza de su posición ni la
+  // duplica (la lista se reconstruye entera cada vez).
+  var corrTab = '<div class="proj-tab fixed-tab' + (_correlationActive ? ' active' : '') + '"'
+    + ' onclick="switchToCorrelation()" title="Correlación estratigráfica — comparar columnas lado a lado">'
+    + '<span class="proj-tab-name">Correlación estratigráfica</span>'
+    + '</div>';
+
+  cont.innerHTML = colTabs + corrTab;
+}
+
+// Seed: demo variado de litologías y simbología
+const seed = [
+  { code:'U1', thickness:12, primaryLithology:'Conglomerado',
+    upperContactType:'neto', sedimentaryStructures:['Gradación normal'],
+    perfilGranulometrico:[
+      { alturaRelativa:0, tamanoGrano:'grava' },
+      { alturaRelativa:1, tamanoGrano:'grava' },
+    ],
+    estructurasSedimentarias:[
+      { alturaRelativa:0.5, tipoEstructura:'Gradación normal' },
+    ] },
+  { code:'U2', thickness:18, primaryLithology:'Arenisca media',
+    upperContactType:'gradual',
+    sedimentaryStructures:['Estratificación cruzada','Gradación normal'], fossilContent:'escasos',
+    perfilGranulometrico:[
+      { alturaRelativa:0,   tamanoGrano:'arena_gruesa' },
+      { alturaRelativa:1,   tamanoGrano:'arena_fina'   },
+    ],
+    estructurasSedimentarias:[
+      { alturaRelativa:0.15, tipoEstructura:'Gradación normal'         },
+      { alturaRelativa:0.45, tipoEstructura:'Estratificación cruzada'  },
+      { alturaRelativa:0.75, tipoEstructura:'Ondulitas'                },
+    ] },
+  { code:'U3', thickness:8,  primaryLithology:'Lutita',
+    upperContactType:'neto',
+    sedimentaryStructures:['Laminación paralela'], fossilContent:'comun',
+    perfilGranulometrico:[
+      { alturaRelativa:0, tamanoGrano:'arcilla' },
+      { alturaRelativa:1, tamanoGrano:'arcilla' },
+    ],
+    estructurasSedimentarias:[
+      { alturaRelativa:0.25, tipoEstructura:'Laminación paralela' },
+      { alturaRelativa:0.75, tipoEstructura:'Laminación paralela' },
+    ],
+    observaciones:[
+      { alturaRelativa:0.5, texto:'Clorita abundante, oxidación local' },
+    ] },
+  { code:'U4', thickness:14, primaryLithology:'Caliza',
+    upperContactType:'erosivo',
+    sedimentaryStructures:['Laminación paralela'], fossilContent:'abundante',
+    observaciones:[
+      { alturaRelativa:0.3, texto:'Nódulos de sílex, 2–5 cm' },
+      { alturaRelativa:0.75, texto:'Microfauna diversa' },
+    ] },
+  { code:'U5', thickness:10, primaryLithology:'Ignimbrita soldada',
+    upperContactType:'tectonico', sedimentaryStructures:['Masiva'],
+    observaciones:[
+      { alturaRelativa:0.5, texto:'Fiamme elongadas EW' },
+    ] },
+  { code:'U6', thickness:6,  primaryLithology:'Lava basáltica',
+    upperContactType:'neto',    sedimentaryStructures:['Masiva'] },
+];
+// ── Draft state ──────────────────────────────────────────────────
+let _draft   = null; // current editor draft (null = closed)
+let _draftId = null; // id of unit being edited (null = new)
+let _pendingDeleteId = null;
+
+// ── View mode ────────────────────────────────────────────────────
+const _gsIconSize = 14;
+
+// ── Zoom ─────────────────────────────────────────────────────────
+const ZOOM_MIN = 0.4, ZOOM_MAX = 3, ZOOM_STEP = 1.2;
+let _zoom = 1;
+let _zoomToolActive = false;
+
+function toggleZoomTool() {
+  _zoomToolActive = !_zoomToolActive;
+  document.getElementById('col-view').classList.toggle('zoom-tool-active', _zoomToolActive);
+  document.getElementById('btn-zoom-tool').classList.toggle('active', _zoomToolActive);
+}
+
+function onColViewClick(ev) {
+  const legendRow = ev.target.closest && ev.target.closest('[data-legend-kind]');
+  if (legendRow) { startLegendEdit(legendRow); return; }
+  if (!_zoomToolActive) return;
+  setZoom(ev.shiftKey ? _zoom / ZOOM_STEP : _zoom * ZOOM_STEP);
+}
+
+function resetZoom() { setZoom(1); }
+
+function setZoom(z) {
+  _zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+  applyZoom();
+}
+
+// ── Edición in-situ de la leyenda ──────────────────────────────────
+// Clic sobre una fila de la leyenda (ver data-legend-kind/data-legend-key
+// en renderer-gslog.js → drawLegend()) abre un <input> flotante posicionado
+// sobre el texto. Enter/blur guarda el override en el store
+// (store.setLegendLabel), Escape cancela sin guardar. Texto vacío borra
+// el override y vuelve al nombre por defecto.
+let _legendEditEl = null;
+
+function startLegendEdit(rowEl) {
+  const kind = rowEl.getAttribute('data-legend-kind');
+  const key  = rowEl.getAttribute('data-legend-key');
+  if (_legendEditEl && _legendEditEl._legendKind === kind && _legendEditEl._legendKey === key) return;
+  if (_legendEditEl) _legendEditEl.blur(); // commitea cualquier edición previa — dispara un re-render síncrono
+
+  const containerEl = document.getElementById('col-view');
+  // El blur de arriba puede haber reemplazado #col-view.innerHTML (store →
+  // renderAll), dejando `rowEl` desconectado del documento. Se vuelve a
+  // buscar la fila por sus data-attributes en el DOM ACTUAL en vez de
+  // confiar en la referencia original — si no, getBoundingClientRect()
+  // sobre un nodo huérfano da 0,0,0,0 y el editor se abre fuera de vista.
+  const liveRow = containerEl && Array.from(containerEl.querySelectorAll(`[data-legend-kind="${kind}"]`))
+    .find(g => g.getAttribute('data-legend-key') === key);
+  const textEl = liveRow ? liveRow.querySelector('text') : null;
+  if (!textEl || !containerEl) return;
+
+  const rect          = textEl.getBoundingClientRect();
+  const containerRect = containerEl.getBoundingClientRect();
+  const INPUT_H = 17; // debe calzar con .legend-edit-input (font-size + padding + borde)
+
+  // Centra el input sobre el centro vertical del texto (no sobre su borde
+  // superior) para minimizar que invada la fila vecina — las filas de la
+  // leyenda son angostas (LEG_ROW_H en renderer-gslog.js) y el input, con
+  // una fuente más legible que el texto de 8px del SVG, ocupa casi toda
+  // la fila.
+  const textCenterY = rect.top + rect.height / 2 - containerRect.top + containerEl.scrollTop;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'legend-edit-input';
+  input.value = textEl.textContent.trim();
+  input._legendKind = kind;
+  input._legendKey  = key;
+  input.style.left  = (rect.left - containerRect.left + containerEl.scrollLeft - 3) + 'px';
+  input.style.top   = (textCenterY - INPUT_H / 2) + 'px';
+  input.style.width = Math.max(rect.width + 26, 90) + 'px';
+
+  let done = false;
+  function commit() {
+    if (done) return;
+    done = true;
+    const value = input.value;
+    input.remove();
+    if (_legendEditEl === input) _legendEditEl = null;
+    store.setLegendLabel(kind, key, value);
+  }
+  function cancel() {
+    if (done) return;
+    done = true;
+    input.remove();
+    if (_legendEditEl === input) _legendEditEl = null;
+  }
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+  input.addEventListener('blur', commit);
+  input.addEventListener('click', e => e.stopPropagation());
+
+  containerEl.appendChild(input);
+  _legendEditEl = input;
+  input.focus();
+  input.select();
+}
+
+/** Escala el SVG ya renderizado vía CSS width/height (respeta su viewBox,
+ *  así el contenido se reescala en vez de solo recortarse) y deja que
+ *  #col-view (overflow:auto) haga scroll cuando el zoom se pasa del viewport. */
+function applyZoom() {
+  const svg = document.querySelector('#col-view svg');
+  if (svg) {
+    const w = parseFloat(svg.getAttribute('width'));
+    const h = parseFloat(svg.getAttribute('height'));
+    if (!isNaN(w) && !isNaN(h)) {
+      svg.style.width  = (w * _zoom) + 'px';
+      svg.style.height = (h * _zoom) + 'px';
+    }
+  }
+  const badge = document.getElementById('st-zoom');
+  if (badge) badge.textContent = Math.round(_zoom * 100) + '%';
+}
+
+// ── Drag state ───────────────────────────────────────────────────
+let _dragId  = null;
+
+// ── List panel ───────────────────────────────────────────────────
+const CONTACT_PIP = {
+  neto:'pip-neto', gradual:'pip-gradual', erosivo:'pip-erosivo',
+  tectonico:'pip-tectonico', no_expuesto:'pip-no_expuesto',
+};
+
+// ── Init ─────────────────────────────────────────────────────────
+(function init() {
+  const firstProj = _makeProject({
+    name: 'Columna Cerro Blanco', author: 'J. González', scale: 500,
+    location: { description: 'Quebrada Honda, sector norte' },
+  });
+  seed.forEach(u => firstProj.store.addUnit(u));
+  _projects.push(firstProj);
+  _applyProject(0);
+})();
+
+// Divulgación progresiva del editor de unidad — secciones ESTÁTICAS del
+// HTML (ver JSDoc de collapsibleSectionVanilla.js sobre por qué se
+// hidratan en vez de reconstruirse), un solo formulario reusado por
+// todas las unidades, así que el estado abierto/cerrado de cada sección
+// persiste entre unidades distintas de la misma sesión — mismo criterio
+// ya validado en Hidrogeoquímica/Estructural. sec-basico queda afuera a
+// propósito (esencial, sin acordeón, ver su comentario en el HTML).
+(function initEditorCollapsibles() {
+  CollapsibleSectionVanilla.hydrate(document.getElementById('sec-litho'), 'columnas.editorLitologia', false);
+  CollapsibleSectionVanilla.hydrate(document.getElementById('sec-attr'), 'columnas.editorAtributos', false);
+  CollapsibleSectionVanilla.hydrate(document.getElementById('sec-age'), 'columnas.editorEdad', false);
+  CollapsibleSectionVanilla.hydrate(document.getElementById('sec-obs'), 'columnas.editorObservaciones', false);
+})();
+
+// ── Core render ──────────────────────────────────────────────────
+function renderAll() {
+  const state = store.getState();
+  renderColumn(state);
+  renderListPanel(state.column.units);
+  updateFooter(state);
+  const name = state.column.metadata.name || '—';
+  document.getElementById('hdr-sub').textContent = name;
+  const tabLabel = document.querySelector('#proj-tabs .proj-tab.active .proj-tab-name');
+  if (tabLabel) { tabLabel.textContent = name; tabLabel.title = name; }
+}
+
+function renderColumn(state) {
+  const units = _draft
+    ? buildPreviewUnits(state.column.units)
+    : state.column.units;
+
+  const computed = store.calcAccumulatedHeights(units);
+  const ps       = { ...state, computed };
+  const selId    = _draftId ?? (_draft ? '__preview__' : null);
+
+  document.getElementById('col-view').innerHTML =
+    renderGrainSizeLogSVG(ps, { geoConfig: GEO_SYMBOLS, selectedId: selId, iconSize: _gsIconSize });
+  applyZoom();
+}
+
+/** Applies the current draft on top of the committed units array. */
+function buildPreviewUnits(committed) {
+  if (_draftId) {
+    return committed.map(u => u.id === _draftId ? { ...u, ..._draft } : u);
+  }
+  return [...committed, { ..._draft, id: '__preview__', rank: _draft.rank || 'estrato' }];
+}
+
+function renderListPanel(units) {
+  const el = document.getElementById('list-units');
+  if (!units.length) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;font-size:.7rem;color:var(--text-muted)">Sin unidades.</div>';
+    return;
+  }
+  // Show techo→base (reversed)
+  el.innerHTML = [...units].reverse().map((unit, vi) => {
+    const storeIdx = units.length - 1 - vi;
+    const color    = GEO_SYMBOLS.getBaseColor(unit);
+    const pip      = CONTACT_PIP[unit.upperContactType] || 'pip-neto';
+    const litho    = unit.primaryLithology ? unit.primaryLithology.slice(0,18) : '—';
+    const isActive = unit.id === _draftId;
+    return `<div class="unit-row${isActive ? ' active' : ''}"
+                 data-id="${unit.id}" data-vi="${vi}"
+                 draggable="true"
+                 onclick="openEditor('${unit.id}')"
+                 ondragstart="onDragStart(event,'${unit.id}')"
+                 ondragover="onDragOver(event)"
+                 ondragleave="onDragLeave(event)"
+                 ondrop="onDrop(event,'${unit.id}',${storeIdx})"
+                 ondragend="onDragEnd(event)">
+      <span class="drag-handle" onclick="event.stopPropagation()">⠿</span>
+      <div class="unit-swatch" style="background:${color}"></div>
+      <div class="unit-info">
+        <div class="unit-code">${se(unit.code || `U${storeIdx+1}`)}</div>
+        <div class="unit-meta">${unit.thickness.toFixed(1)} m · ${se(litho)}</div>
+      </div>
+      <div class="contact-pip ${pip}" title="Contacto: ${unit.upperContactType || 'neto'}"></div>
+      <button class="row-btn" title="Eliminar"
+              onclick="event.stopPropagation(); askDelete('${unit.id}', '${se(unit.code||`U${storeIdx+1}`)}')">✕</button>
+    </div>`;
+  }).join('');
+}
+
+// ── Footer ───────────────────────────────────────────────────────
+function updateFooter(state) {
+  const totalM = state.computed.length
+    ? state.computed[state.computed.length - 1].heightToTop : 0;
+  document.getElementById('st-units').textContent = state.column.units.length;
+  document.getElementById('st-total').textContent = `${totalM.toFixed(1)} m`;
+  document.getElementById('st-scale').textContent = `1:${state.column.metadata.scale}`;
+
+  const ei = state.validation.errors.length;
+  const wi = state.validation.warnings.length;
+  const el = document.getElementById('val-ind');
+  if (ei)      el.innerHTML = `<span class="v-err">⚠ ${ei} error${ei>1?'es':''}</span>`;
+  else if (wi) el.innerHTML = `<span class="v-warn">${wi} aviso${wi>1?'s':''}</span>`;
+  else         el.innerHTML = state.column.units.length ? '<span class="v-ok">✓ Válida</span>' : '';
+}
+
+// ── Editor: open / close / save ──────────────────────────────────
+function openEditor(unitId) {
+  const unit = store.getState().column.units.find(u => u.id === unitId);
+  if (!unit) return;
+  _draftId = unitId;
+  _draft   = { ...unit };
+  showEditorForm(`Editar · ${unit.code || unitId}`);
+  populateForm();
+  renderAll();
+}
+
+function newEditor() {
+  _draftId = null;
+  _draft   = {
+    code: '', rank: 'estrato', thickness: 5,
+    upperContactType: 'neto',
+    sedimentaryStructures: [],
+  };
+  showEditorForm('Nueva unidad');
+  populateForm();
+  renderAll();
+}
+
+function closeEditor() {
+  _draft   = null;
+  _draftId = null;
+  document.getElementById('edit-placeholder').style.display = '';
+  document.getElementById('edit-form').classList.remove('visible');
+  renderAll();
+}
+
+function saveEditor() {
+  if (!_draft) return;
+  if (!_draft.code?.trim()) { alert('El código es obligatorio.'); return; }
+  if (!_draft.thickness || _draft.thickness <= 0) { alert('El espesor debe ser > 0.'); return; }
+
+  if (_draftId) {
+    store.updateUnit(_draftId, _draft);
+  } else {
+    store.addUnit(_draft);
+  }
+  closeEditor();
+}
+
+function showEditorForm(title) {
+  document.getElementById('edit-placeholder').style.display = 'none';
+  document.getElementById('edit-form').classList.add('visible');
+  document.getElementById('edit-hdr-title').textContent = title;
+  document.getElementById('btn-delete').disabled = !_draftId;
+}
+
+// ── Form population ───────────────────────────────────────────────
+function populateForm() {
+  const d = _draft;
+  val('f-code',    d.code || '');
+  val('f-rank',    d.rank || 'estrato');
+  val('f-thick',   d.thickness ?? '');
+  val('f-litho',   d.primaryLithology || '');
+  val('f-grain',   d.grainSize || '');
+  val('f-facies',  d.volcanicFacies || '');
+  val('f-texture', d.texture || '');
+  val('f-obs',     d.fieldObservations || '');
+  restoreChronoSelectors(d.age);
+  val('f-age-min', d.age?.absolute?.min ?? '');
+  val('f-age-max', d.age?.absolute?.max ?? '');
+  val('f-age-conf',d.age?.confidence  || '');
+  val('f-m-hue',   d.color?.hue   || '');
+  val('f-m-val',   d.color?.value ?? '');
+  val('f-m-chr',   d.color?.chroma ?? '');
+  val('f-m-lbl',   d.color?.label  || '');
+  const fillHex = d.color?.fill || '';
+  const picker = document.getElementById('f-color-fill');
+  const hexIn  = document.getElementById('f-color-fill-hex');
+  if (picker) picker.value = fillHex || '#d8d8d8';
+  if (hexIn)  hexIn.value  = fillHex;
+
+  // Ensure both struct arrays are in sync when opening the editor
+  if (!_draft.estructurasSedimentarias?.length && _draft.sedimentaryStructures?.length) {
+    const n = _draft.sedimentaryStructures.length;
+    _draft.estructurasSedimentarias = _draft.sedimentaryStructures.map((s, i) => ({
+      tipoEstructura: s,
+      alturaRelativa: n === 1 ? 0.5 : i / (n - 1),
+    }));
+  } else if (_draft.estructurasSedimentarias?.length && !_draft.sedimentaryStructures?.length) {
+    _draft.sedimentaryStructures = _draft.estructurasSedimentarias.map(e => e.tipoEstructura);
+  }
+
+  refreshContactChips();
+  refreshFossilChips();
+  refreshStructChips();
+  refreshStructPositions();
+  refreshStructDataList();
+  refreshGradacion();
+  refreshSecLithos();
+}
+
+function val(id, v) {
+  const el = document.getElementById(id);
+  if (el) el.value = v;
+}
+
+// ── Draft update helpers ─────────────────────────────────────────
+function fd(key, value) {
+  if (!_draft) return;
+  _draft[key] = value;
+  renderColumn(store.getState());
+}
+
+function setContact(v) {
+  if (!_draft) return;
+  _draft.upperContactType = v;
+  refreshContactChips();
+  renderColumn(store.getState());
+}
+
+function setFossil(v) {
+  if (!_draft) return;
+  _draft.fossilContent = _draft.fossilContent === v ? 'esteril' : v;
+  refreshFossilChips();
+  renderColumn(store.getState());
+}
+
+function toggleStruct(v) {
+  if (!_draft) return;
+  const arr = _draft.sedimentaryStructures || [];
+  const has = arr.includes(v);
+  _draft.sedimentaryStructures = has ? arr.filter(s => s !== v) : [...arr, v];
+  const posArr = _draft.estructurasSedimentarias || [];
+  // "Gradación normal/inversa" es una estructura como cualquier otra (ícono,
+  // leyenda, conteo). Ya NO crea ni borra `perfilGranulometrico`: la forma
+  // afinada depende SOLO del rango granulométrico (ver refreshGradacion()).
+  if (has) {
+    _draft.estructurasSedimentarias = posArr.filter(e => e.tipoEstructura !== v);
+  } else {
+    _draft.estructurasSedimentarias = [...posArr, { tipoEstructura: v, alturaRelativa: 0.5, offsetX: 0, iconSize: null, iconSizeX: null }];
+  }
+  refreshStructChips();
+  refreshStructPositions();
+  renderColumn(store.getState());
+}
+
+function setColor(part, v) {
+  if (!_draft) return;
+  _draft.color = { ...(_draft.color || {}), [part]: v };
+}
+
+function setAge(part, v) {
+  if (!_draft) return;
+  _draft.age = { ...(_draft.age || {}), [part]: v };
+}
+
+function setAgeAbs(part, v) {
+  if (!_draft) return;
+  _draft.age = { ...(_draft.age || {}), absolute: { ...(_draft.age?.absolute || {}), [part]: v, unit: 'Ma' } };
+}
+
+// ── Chronostrat ICS cascading selectors ─────────────────────────
+var _csState = { eon: '', era: '', period: '', epoca: '', edad: '', rgb: null };
+
+function _csPopulate(selId, items, placeholder) {
+  const sel = document.getElementById(selId);
+  if (!sel) return;
+  sel.innerHTML = `<option value="">${placeholder}</option>`;
+  (items || []).forEach(it => {
+    const opt = document.createElement('option');
+    opt.value = it.name;
+    opt.textContent = it.name;
+    sel.appendChild(opt);
+  });
+}
+
+function _csSwatch(id, rgb) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (rgb) {
+    el.style.background = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+    el.style.borderColor = 'rgba(0,0,0,.25)';
+  } else {
+    el.style.background = 'transparent';
+    el.style.borderColor = 'rgba(0,0,0,.12)';
+  }
+}
+
+function _csUpdateApplyBtn() {
+  const btn = document.getElementById('btn-ics-apply');
+  if (!btn) return;
+  if (_csState.rgb) {
+    const [r, g, b] = _csState.rgb;
+    btn.style.display = 'block';
+    btn.style.background = `rgb(${r},${g},${b})`;
+    btn.style.color = (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.55 ? '#1e293b' : '#fff';
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+function _csBestRgb() {
+  const cs = _csState;
+  const cd = CHRONOSTRAT_DATA;
+  return cd.findEdad(cs.eon, cs.era, cs.period, cs.epoca, cs.edad)?.rgb
+    || cd.findEpoca(cs.eon, cs.era, cs.period, cs.epoca)?.rgb
+    || cd.findPeriodo(cs.eon, cs.era, cs.period)?.rgb
+    || cd.findEra(cs.eon, cs.era)?.rgb
+    || cd.findEon(cs.eon)?.rgb
+    || null;
+}
+
+function initChronoSelectors() {
+  _csPopulate('cs-eon', CHRONOSTRAT_DATA?.eons || [], '— Sin especificar —');
+  _csPopulate('cs-era', [], '— Era —');
+  _csPopulate('cs-period', [], '— Período —');
+  _csPopulate('cs-epoca', [], '— Época —');
+  _csPopulate('cs-edad', [], '— Edad —');
+  ['eon','era','period','epoca','edad'].forEach(k => _csSwatch(`cs-sw-${k}`, null));
+  _csState = { eon: '', era: '', period: '', epoca: '', edad: '', rgb: null };
+  _csUpdateApplyBtn();
+}
+
+function restoreChronoSelectors(age) {
+  if (!age) { initChronoSelectors(); return; }
+
+  // Backward compat: if eon/era missing but period present, resolve hierarchy
+  let a = { ...age };
+  if (!a.eon && a.period) {
+    const res = CHRONOSTRAT_DATA.resolveFromPeriod(a.period);
+    if (res) Object.assign(a, res);
+  }
+
+  _csState = { eon: a.eon||'', era: a.era||'', period: a.period||'', epoca: a.epoca||'', edad: a.edad||'', rgb: null };
+
+  _csPopulate('cs-eon', CHRONOSTRAT_DATA.eons, '— Sin especificar —');
+  document.getElementById('cs-eon').value = _csState.eon;
+  const eonObj = CHRONOSTRAT_DATA.findEon(_csState.eon);
+  _csSwatch('cs-sw-eon', eonObj?.rgb || null);
+
+  _csPopulate('cs-era', eonObj?.eras || [], '— Era —');
+  document.getElementById('cs-era').value = _csState.era;
+  const eraObj = CHRONOSTRAT_DATA.findEra(_csState.eon, _csState.era);
+  _csSwatch('cs-sw-era', eraObj?.rgb || null);
+
+  _csPopulate('cs-period', eraObj?.periodos || [], '— Período —');
+  document.getElementById('cs-period').value = _csState.period;
+  const perObj = CHRONOSTRAT_DATA.findPeriodo(_csState.eon, _csState.era, _csState.period);
+  _csSwatch('cs-sw-period', perObj?.rgb || null);
+
+  _csPopulate('cs-epoca', perObj?.epocas || [], '— Época —');
+  document.getElementById('cs-epoca').value = _csState.epoca;
+  const epocaObj = CHRONOSTRAT_DATA.findEpoca(_csState.eon, _csState.era, _csState.period, _csState.epoca);
+  _csSwatch('cs-sw-epoca', epocaObj?.rgb || null);
+
+  _csPopulate('cs-edad', epocaObj?.edades || [], '— Edad —');
+  document.getElementById('cs-edad').value = _csState.edad;
+  const edadObj = CHRONOSTRAT_DATA.findEdad(_csState.eon, _csState.era, _csState.period, _csState.epoca, _csState.edad);
+  _csSwatch('cs-sw-edad', edadObj?.rgb || null);
+
+  _csState.rgb = _csBestRgb();
+  _csUpdateApplyBtn();
+}
+
+function onCsEon(val) {
+  if (!_draft) return;
+  _csState = { eon: val, era: '', period: '', epoca: '', edad: '', rgb: null };
+  const eonObj = CHRONOSTRAT_DATA.findEon(val);
+  _csSwatch('cs-sw-eon', eonObj?.rgb || null);
+  _csPopulate('cs-era', eonObj?.eras || [], '— Era —');
+  _csPopulate('cs-period', [], '— Período —');
+  _csPopulate('cs-epoca', [], '— Época —');
+  _csPopulate('cs-edad', [], '— Edad —');
+  ['era','period','epoca','edad'].forEach(k => _csSwatch(`cs-sw-${k}`, null));
+  _csState.rgb = eonObj?.rgb || null;
+  _draft.age = { ...(_draft.age||{}), eon: val, era: '', period: '', epoca: '', edad: '' };
+  _csUpdateApplyBtn();
+}
+
+function onCsEra(val) {
+  if (!_draft) return;
+  _csState.era = val; _csState.period = ''; _csState.epoca = ''; _csState.edad = '';
+  const eraObj = CHRONOSTRAT_DATA.findEra(_csState.eon, val);
+  _csSwatch('cs-sw-era', eraObj?.rgb || null);
+  _csPopulate('cs-period', eraObj?.periodos || [], '— Período —');
+  _csPopulate('cs-epoca', [], '— Época —');
+  _csPopulate('cs-edad', [], '— Edad —');
+  ['period','epoca','edad'].forEach(k => _csSwatch(`cs-sw-${k}`, null));
+  _csState.rgb = _csBestRgb();
+  _draft.age = { ...(_draft.age||{}), era: val, period: '', epoca: '', edad: '' };
+  _csUpdateApplyBtn();
+}
+
+function onCsPeriod(val) {
+  if (!_draft) return;
+  _csState.period = val; _csState.epoca = ''; _csState.edad = '';
+  const perObj = CHRONOSTRAT_DATA.findPeriodo(_csState.eon, _csState.era, val);
+  _csSwatch('cs-sw-period', perObj?.rgb || null);
+  _csPopulate('cs-epoca', perObj?.epocas || [], '— Época —');
+  _csPopulate('cs-edad', [], '— Edad —');
+  ['epoca','edad'].forEach(k => _csSwatch(`cs-sw-${k}`, null));
+  _csState.rgb = _csBestRgb();
+  _draft.age = { ...(_draft.age||{}), period: val, epoca: '', edad: '' };
+  _csUpdateApplyBtn();
+}
+
+function onCsEpoca(val) {
+  if (!_draft) return;
+  _csState.epoca = val; _csState.edad = '';
+  const epocaObj = CHRONOSTRAT_DATA.findEpoca(_csState.eon, _csState.era, _csState.period, val);
+  _csSwatch('cs-sw-epoca', epocaObj?.rgb || null);
+  _csPopulate('cs-edad', epocaObj?.edades || [], '— Edad —');
+  _csSwatch('cs-sw-edad', null);
+  _csState.rgb = _csBestRgb();
+  _draft.age = { ...(_draft.age||{}), epoca: val, edad: '' };
+  _csUpdateApplyBtn();
+}
+
+function onCsEdad(val) {
+  if (!_draft) return;
+  _csState.edad = val;
+  const edadObj = CHRONOSTRAT_DATA.findEdad(_csState.eon, _csState.era, _csState.period, _csState.epoca, val);
+  _csSwatch('cs-sw-edad', edadObj?.rgb || null);
+  _csState.rgb = _csBestRgb();
+  _draft.age = { ...(_draft.age||{}), edad: val };
+  _csUpdateApplyBtn();
+}
+
+function applyIcsColor() {
+  if (!_draft || !_csState.rgb) return;
+  const [r, g, b] = _csState.rgb;
+  const hex = '#' + [r, g, b].map(c => c.toString(16).padStart(2, '0')).join('');
+  _setFillColor(hex);
+}
+
+function _setFillColor(hex) {
+  if (!_draft) return;
+  _draft.color = { ...(_draft.color || {}), fill: hex || undefined };
+  if (!hex) delete _draft.color.fill;
+  const picker = document.getElementById('f-color-fill');
+  const hexIn = document.getElementById('f-color-fill-hex');
+  if (picker) picker.value = hex || '#d8d8d8';
+  if (hexIn) hexIn.value = hex || '';
+}
+
+function onFillPickerChange(hex) {
+  _setFillColor(hex);
+}
+
+function onFillHexInput(val) {
+  const hex = val.trim();
+  if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+    _setFillColor(hex);
+    const picker = document.getElementById('f-color-fill');
+    if (picker) picker.value = hex;
+  }
+}
+
+function clearFillColor() {
+  _setFillColor('');
+}
+
+function addSecLitho(v) {
+  if (!v || !_draft) return;
+  const arr = _draft.secondaryLithologies || [];
+  if (!arr.includes(v)) {
+    _draft.secondaryLithologies = [...arr, v];
+    refreshSecLithos();
+  }
+}
+
+function removeSecLitho(v) {
+  if (!_draft) return;
+  _draft.secondaryLithologies = (_draft.secondaryLithologies || []).filter(s => s !== v);
+  refreshSecLithos();
+}
+
+// ── Chip refresh ─────────────────────────────────────────────────
+function refreshContactChips() {
+  const cur = _draft?.upperContactType;
+  document.querySelectorAll('#chips-contact .chip').forEach(c => {
+    c.classList.toggle('on', c.classList.contains(cur));
+  });
+}
+
+function refreshFossilChips() {
+  const cur = _draft?.fossilContent || 'esteril';
+  const map = { esteril:'Estéril', escasos:'Escasos', comun:'Común', abundante:'Abundante', bioherma:'Bioherma' };
+  document.querySelectorAll('#chips-fossil .chip').forEach(c => {
+    c.classList.toggle('on', c.textContent.trim() === (map[cur] || ''));
+  });
+}
+
+function refreshStructChips() {
+  const posArr = _draft?.estructurasSedimentarias || [];
+  const active = new Set(posArr.map(e => e.tipoEstructura));
+  (_draft?.sedimentaryStructures || []).forEach(n => active.add(n));
+  document.querySelectorAll('#chips-struct .chip').forEach(c => {
+    const m = c.getAttribute('onclick')?.match(/toggleStruct\('([^']+)'\)/);
+    if (m) c.classList.toggle('on', active.has(m[1]));
+  });
+  // Auto-expand groups that contain active chips
+  document.querySelectorAll('#chips-struct .cg-block').forEach(block => {
+    const hasActive = block.querySelector('.chip.on') !== null;
+    if (hasActive) block.classList.remove('collapsed');
+    else block.classList.add('collapsed');
+  });
+}
+
+function toggleChipGroup(toggleEl) {
+  const block = toggleEl.closest('.cg-block');
+  if (block) block.classList.toggle('collapsed');
+}
+
+function filterStructChips(q) {
+  const query = q.trim().toLowerCase();
+  document.querySelectorAll('#chips-struct .cg-block').forEach(block => {
+    let anyVisible = false;
+    block.querySelectorAll('.chip').forEach(chip => {
+      const text = chip.textContent.toLowerCase();
+      const onclickAttr = chip.getAttribute('onclick') || '';
+      const fullName = (onclickAttr.match(/toggleStruct\('([^']+)'\)/) || [])[1] || '';
+      const matches = !query || text.includes(query) || fullName.toLowerCase().includes(query);
+      chip.style.display = matches ? '' : 'none';
+      if (matches) anyVisible = true;
+    });
+    block.style.display = anyVisible ? '' : 'none';
+    if (query && anyVisible) block.classList.remove('collapsed');
+    else if (!query) {
+      const hasActive = block.querySelector('.chip.on') !== null;
+      block.classList.toggle('collapsed', !hasActive);
+    }
+  });
+}
+
+let _lithoFocusIdx = -1;
+
+function filterLitho(q) {
+  const query = q.trim().toLowerCase();
+  const sugg  = document.getElementById('litho-suggestions');
+  const sel   = document.getElementById('f-litho');
+  if (!sugg || !sel) return;
+  _lithoFocusIdx = -1;
+
+  if (!query) { sugg.style.display = 'none'; return; }
+
+  // Collect matching options grouped by optgroup
+  const rows = [];
+  let currentGroup = '';
+  Array.from(sel.options).forEach(opt => {
+    if (!opt.value) return;
+    const parent = opt.parentElement;
+    const grpLabel = parent.tagName === 'OPTGROUP' ? parent.label : '';
+    const matches = opt.text.toLowerCase().includes(query) || opt.value.toLowerCase().includes(query);
+    if (!matches) return;
+    if (grpLabel && grpLabel !== currentGroup) {
+      rows.push({ type: 'group', label: grpLabel });
+      currentGroup = grpLabel;
+    }
+    rows.push({ type: 'opt', text: opt.text, value: opt.value });
+  });
+
+  if (rows.length === 0) { sugg.style.display = 'none'; return; }
+
+  sugg.innerHTML = rows.map((r, i) => {
+    if (r.type === 'group') return `<div class="litho-opt group-hdr">${r.label}</div>`;
+    return `<div class="litho-opt" data-value="${r.value}" onmousedown="pickLitho('${r.value.replace(/'/g,"\\'")}', this)">${r.text}</div>`;
+  }).join('');
+  sugg.style.display = 'block';
+}
+
+function pickLitho(value, el) {
+  fd('primaryLithology', value);
+  clearLithoFilter();
+  // Sync the hidden select display value
+  const sel = document.getElementById('f-litho');
+  if (sel) sel.value = value;
+}
+
+function clearLithoFilter() {
+  const inp = document.getElementById('litho-filter');
+  if (inp) inp.value = '';
+  hideLithoSugg();
+}
+
+function hideLithoSugg() {
+  const sugg = document.getElementById('litho-suggestions');
+  if (sugg) sugg.style.display = 'none';
+  _lithoFocusIdx = -1;
+}
+
+function onLithoKey(e) {
+  const sugg = document.getElementById('litho-suggestions');
+  if (!sugg || sugg.style.display === 'none') return;
+  const opts = Array.from(sugg.querySelectorAll('.litho-opt:not(.group-hdr)'));
+  if (!opts.length) return;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    _lithoFocusIdx = Math.min(_lithoFocusIdx + 1, opts.length - 1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    _lithoFocusIdx = Math.max(_lithoFocusIdx - 1, 0);
+  } else if (e.key === 'Enter' && _lithoFocusIdx >= 0) {
+    e.preventDefault();
+    pickLitho(opts[_lithoFocusIdx].dataset.value, opts[_lithoFocusIdx]);
+    return;
+  } else if (e.key === 'Escape') {
+    hideLithoSugg(); return;
+  } else return;
+  opts.forEach((o, i) => o.classList.toggle('focused', i === _lithoFocusIdx));
+}
+
+function refreshStructPositions() {
+  const arr = _draft?.estructurasSedimentarias || [];
+  const el  = document.getElementById('struct-pos-list');
+  if (!el) return;
+  if (arr.length === 0) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  const thick = parseFloat(_draft?.thickness) || 1;
+  const STRUCT_SHORT = {
+    'Masiva':'Masiva','Laminación paralela':'Lamin. paralela',
+    'Estratificación cruzada':'Est. cruzada','Estratificación cruzada en artesa':'Est. artesa',
+    'Ondulitas':'Ondulitas','Gradación normal':'Grad. normal',
+    'Gradación inversa':'Grad. inversa','Bioturbación (en general)':'Bioturbación',
+    'Deformación por licuefacción':'Licuefacción',
+  };
+  const totalByType = {};
+  arr.forEach(e => { totalByType[e.tipoEstructura] = (totalByType[e.tipoEstructura] || 0) + 1; });
+  const seenByType = {};
+  el.innerHTML = arr.map((e, idx) => {
+    const meters   = (e.alturaRelativa * thick).toFixed(2);
+    const offsetX  = e.offsetX ?? 0;
+    // Tamaño mostrado: respeta la proporción natural de la foto salvo que
+    // el usuario ya haya fijado ambos ejes a mano (misma lógica que dibuja
+    // la columna — ver GEO_SYMBOLS.resolveStructIconSize).
+    const { w: iconSzXRaw, h: iconSzYRaw } =
+      GEO_SYMBOLS.resolveStructIconSize(e.tipoEstructura, e.iconSize, e.iconSizeX, _gsIconSize, 44);
+    const iconSzY  = Math.round(iconSzYRaw);
+    const iconSzX  = Math.round(iconSzXRaw);
+    const tipo     = e.tipoEstructura;
+    const ordinal  = (seenByType[tipo] = (seenByType[tipo] || 0) + 1);
+    const baseLabel = STRUCT_SHORT[tipo] || tipo;
+    const label    = totalByType[tipo] > 1 ? `${baseLabel} (${ordinal})` : baseLabel;
+    return `<div class="sp-row">
+      <div class="sp-row-name">
+        <span class="sp-row-name-txt" title="${se(baseLabel)}">${se(label)}</span>
+        <button class="sp-add-btn" onclick="addStructInstance('${se(tipo)}')" title="Agregar otro ícono de ${se(baseLabel)}">+</button>
+        <button class="sp-del-btn" onclick="removeStructInstance(${idx})" title="Eliminar este ícono">✕</button>
+      </div>
+      <div class="sp-controls">
+        <div class="sp-ctrl">
+          <span class="sp-ctrl-label">Y</span>
+          <input class="sp-input" type="number" min="0" max="${thick}" step="0.1"
+                 value="${meters}" oninput="updateStructPos(${idx}, this.value)"
+                 title="Metros desde la base">
+        </div>
+        <div class="sp-ctrl">
+          <span class="sp-ctrl-label">X</span>
+          <input class="sp-input" type="number" min="-50" max="50" step="1"
+                 value="${offsetX}" oninput="updateStructOffsetX(${idx}, this.value)"
+                 title="Desplazamiento horizontal en px">
+        </div>
+        <div class="sp-ctrl">
+          <span class="sp-ctrl-label">Tamaño Y</span>
+          <input id="sp-szy-${idx}" class="sp-input" type="number" min="6" max="40" step="1"
+                 value="${iconSzY}" oninput="updateStructSizeIndiv(${idx}, this.value)"
+                 title="Alto del ícono en px">
+        </div>
+        <div class="sp-ctrl">
+          <span class="sp-ctrl-label">Tamaño X</span>
+          <input id="sp-szx-${idx}" class="sp-input" type="number" min="6" max="80" step="1"
+                 value="${iconSzX}" oninput="updateStructSizeX(${idx}, this.value)"
+                 title="Ancho del ícono en px">
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateStructPos(idx, rawVal) {
+  if (!_draft) return;
+  const thick = parseFloat(_draft.thickness) || 1;
+  const m  = parseFloat(rawVal) || 0;
+  const ar = Math.max(0, Math.min(1, m / thick));
+  const arr = [...(_draft.estructurasSedimentarias || [])];
+  if (arr[idx]) {
+    arr[idx] = { ...arr[idx], alturaRelativa: ar };
+    _draft.estructurasSedimentarias = arr;
+    renderColumn(store.getState());
+  }
+}
+
+function updateStructOffsetX(idx, rawVal) {
+  if (!_draft) return;
+  const v   = parseInt(rawVal, 10) || 0;
+  const arr = [...(_draft.estructurasSedimentarias || [])];
+  if (arr[idx]) {
+    arr[idx] = { ...arr[idx], offsetX: v };
+    _draft.estructurasSedimentarias = arr;
+    renderColumn(store.getState());
+  }
+}
+
+function updateStructSizeIndiv(idx, rawVal) {
+  if (!_draft) return;
+  const v   = Math.max(6, Math.min(40, parseInt(rawVal, 10) || _gsIconSize));
+  const arr = [...(_draft.estructurasSedimentarias || [])];
+  if (arr[idx]) {
+    arr[idx] = { ...arr[idx], iconSize: v };
+    _draft.estructurasSedimentarias = arr;
+    renderColumn(store.getState());
+    // Si Tamaño X sigue sin fijar a mano, sigue la proporción natural a
+    // partir del nuevo Tamaño Y — actualiza solo su valor mostrado (sin
+    // refreshStructPositions completo, para no perder el foco al tipear).
+    if (arr[idx].iconSizeX == null) {
+      const xInput = document.getElementById(`sp-szx-${idx}`);
+      if (xInput && document.activeElement !== xInput) {
+        const { w } = GEO_SYMBOLS.resolveStructIconSize(arr[idx].tipoEstructura, v, null, _gsIconSize, 44);
+        xInput.value = Math.round(w);
+      }
+    }
+  }
+}
+
+function updateStructSizeX(idx, rawVal) {
+  if (!_draft) return;
+  const v   = Math.max(6, Math.min(80, parseInt(rawVal, 10) || 44));
+  const arr = [...(_draft.estructurasSedimentarias || [])];
+  if (arr[idx]) {
+    arr[idx] = { ...arr[idx], iconSizeX: v };
+    _draft.estructurasSedimentarias = arr;
+    renderColumn(store.getState());
+    // Igual que arriba, pero para Tamaño Y siguiendo el nuevo Tamaño X.
+    if (arr[idx].iconSize == null) {
+      const yInput = document.getElementById(`sp-szy-${idx}`);
+      if (yInput && document.activeElement !== yInput) {
+        const { h } = GEO_SYMBOLS.resolveStructIconSize(arr[idx].tipoEstructura, null, v, _gsIconSize, 44);
+        yInput.value = Math.round(h);
+      }
+    }
+  }
+}
+
+function addStructInstance(tipo) {
+  if (!_draft) return;
+  const posArr = _draft.estructurasSedimentarias || [];
+  const sameType = posArr.filter(e => e.tipoEstructura === tipo);
+  const last = sameType[sameType.length - 1];
+  // Offset a bit from the last instance of this type so the new one doesn't land exactly on top.
+  const alturaRelativa = last ? Math.max(0, last.alturaRelativa - 0.08) : 0.5;
+  const offsetX = last ? (last.offsetX ?? 0) + 12 : 0;
+  _draft.estructurasSedimentarias = [...posArr, {
+    tipoEstructura: tipo, alturaRelativa, offsetX,
+    iconSize: last?.iconSize ?? null, iconSizeX: last?.iconSizeX ?? null,
+  }];
+  if (!(_draft.sedimentaryStructures || []).includes(tipo)) {
+    _draft.sedimentaryStructures = [...(_draft.sedimentaryStructures || []), tipo];
+    refreshStructChips();
+  }
+  refreshStructPositions();
+  renderColumn(store.getState());
+}
+
+function removeStructInstance(idx) {
+  if (!_draft) return;
+  const arr = [...(_draft.estructurasSedimentarias || [])];
+  if (!arr[idx]) return;
+  const tipo = arr[idx].tipoEstructura;
+  arr.splice(idx, 1);
+  _draft.estructurasSedimentarias = arr;
+  if (!arr.some(e => e.tipoEstructura === tipo)) {
+    _draft.sedimentaryStructures = (_draft.sedimentaryStructures || []).filter(s => s !== tipo);
+    refreshStructChips();
+  }
+  refreshStructPositions();
+  renderColumn(store.getState());
+}
+
+// ── Datos estructurales ──────────────────────────────────────────────
+
+function addStructData() {
+  if (!_draft) return;
+  _draft.datosEstructurales = [...(_draft.datosEstructurales || []),
+    { alturaRelativa: 0.5, tipo: 'estratificacion', inclinacion: 30,
+      offsetX: 0, iconSize: null, iconSizeX: null, dato: '' }];
+  refreshStructDataList();
+  renderColumn(store.getState());
+}
+
+function removeStructData(idx) {
+  if (!_draft) return;
+  const arr = [...(_draft.datosEstructurales || [])];
+  arr.splice(idx, 1);
+  _draft.datosEstructurales = arr;
+  refreshStructDataList();
+  renderColumn(store.getState());
+}
+
+function updateStructData(idx, key, val) {
+  if (!_draft) return;
+  const arr = [...(_draft.datosEstructurales || [])];
+  if (!arr[idx]) return;
+  arr[idx] = { ...arr[idx], [key]: val };
+  _draft.datosEstructurales = arr;
+  renderColumn(store.getState());
+}
+
+function updateStructDataPos(idx, rawVal) {
+  if (!_draft) return;
+  const thick = parseFloat(_draft.thickness) || 1;
+  updateStructData(idx, 'alturaRelativa', Math.max(0, Math.min(1, (parseFloat(rawVal) || 0) / thick)));
+}
+
+function refreshStructDataList() {
+  const el = document.getElementById('struct-data-list');
+  if (!el) return;
+  const arr = _draft?.datosEstructurales || [];
+  if (arr.length === 0) { el.innerHTML = ''; return; }
+  const thick = parseFloat(_draft?.thickness) || 1;
+  const TIPOS = [
+    ['estratificacion','Estratificación'],
+    ['falla_normal','Falla normal'],
+    ['falla_inversa','Falla inversa'],
+    ['diaclasa','Diaclasa'],
+    ['anticlinal','Anticlinal'],
+    ['sinclinal','Sinclinal'],
+    ['foliacion','Foliación'],
+  ];
+  // Mismos defaults que drawStructuralData() en geo-symbols.js (rw=108,
+  // el ancho de la columna de estructuras — ver STRUCT_W en renderer-gslog.js).
+  const SD_DEFAULT_W = 108, SD_DEFAULT_H = 14;
+  el.innerHTML = arr.map((d, i) => {
+    const opts  = TIPOS.map(([v,l]) => `<option value="${v}"${d.tipo===v?' selected':''}>${l}</option>`).join('');
+    const hasDip = !['anticlinal','sinclinal'].includes(d.tipo);
+    const meters = ((d.alturaRelativa ?? 0.5) * thick).toFixed(2);
+    const offsetX = d.offsetX ?? 0;
+    const szY = d.iconSize  != null ? d.iconSize  : SD_DEFAULT_H;
+    const szX = d.iconSizeX != null ? d.iconSizeX : SD_DEFAULT_W;
+    return `<div class="sd-row">
+      <select class="sd-sel" onchange="updateStructData(${i},'tipo',this.value);refreshStructDataList()">${opts}</select>
+      ${hasDip ? `<div class="sp-ctrl">
+        <span class="sp-ctrl-label">Incl.</span>
+        <input class="sp-input" type="number" min="0" max="90" step="1" value="${se(d.inclinacion??30)}"
+               oninput="updateStructData(${i},'inclinacion',Math.max(0,Math.min(90,parseInt(this.value)||0)))" title="Inclinación (°)">
+      </div>` : ''}
+      <div class="sp-ctrl">
+        <span class="sp-ctrl-label">Y (m)</span>
+        <input class="sp-input" type="number" min="0" max="${thick}" step="0.1" value="${se(meters)}"
+               oninput="updateStructDataPos(${i},this.value)" title="Altura desde la base">
+      </div>
+      <div class="sp-ctrl">
+        <span class="sp-ctrl-label">X</span>
+        <input class="sp-input" type="number" min="-50" max="50" step="1" value="${se(offsetX)}"
+               oninput="updateStructData(${i},'offsetX',parseInt(this.value)||0)" title="Desplazamiento horizontal en px">
+      </div>
+      <div class="sp-ctrl">
+        <span class="sp-ctrl-label">Tamaño Y</span>
+        <input class="sp-input" type="number" min="6" max="40" step="1" value="${se(szY)}"
+               oninput="updateStructData(${i},'iconSize',Math.max(6,Math.min(40,parseInt(this.value)||${SD_DEFAULT_H})))" title="Alto del símbolo en px">
+      </div>
+      <div class="sp-ctrl">
+        <span class="sp-ctrl-label">Tamaño X</span>
+        <input class="sp-input" type="number" min="6" max="150" step="1" value="${se(szX)}"
+               oninput="updateStructData(${i},'iconSizeX',Math.max(6,Math.min(150,parseInt(this.value)||${SD_DEFAULT_W})))" title="Ancho del símbolo en px">
+      </div>
+      <div class="sp-ctrl" style="flex:1;min-width:90px">
+        <span class="sp-ctrl-label">Dato estructural</span>
+        <input class="sp-input" type="text" style="width:100%" value="${se(d.dato ?? '')}"
+               oninput="updateStructData(${i},'dato',this.value)" title="Campo libre (texto o número), p.ej. rumbo N45°E">
+      </div>
+      <button class="sp-del-btn" onclick="removeStructData(${i})" title="Eliminar">✕</button>
+    </div>`;
+  }).join('');
+}
+
+// Orden Wentworth fino → grueso (mismo que GRAIN_SIZE_ORDER en types.ts):
+// índice mayor = grano más grueso. Se usa para derivar la DIRECCIÓN del
+// afinamiento a partir de los dos valores del rango (sin etiquetas).
+var _GRAIN_ORDER = ['arcilla','limo','arena_muy_fina','arena_fina','arena_media',
+  'arena_gruesa','arena_muy_gruesa','granulo','guijarro','grava','bloque'];
+
+/** Texto que describe la forma derivada del rango (base vs techo). */
+function _updateGradHint(desde, hasta) {
+  const el = document.getElementById('grad-hint');
+  if (!el) return;
+  if (!desde || !hasta || desde === hasta) { el.textContent = 'Sin rango — rectángulo plano.'; return; }
+  const di = _GRAIN_ORDER.indexOf(desde), hi = _GRAIN_ORDER.indexOf(hasta);
+  el.textContent = di > hi ? 'Afina hacia arriba (grano decrece).' : 'Engrosa hacia arriba (grano crece).';
+}
+
+/**
+ * Sincroniza los selects De/A del rango granulométrico con el estado del
+ * borrador. El control se muestra SIEMPRE (desacoplado de las estructuras de
+ * gradación). Sin perfil → De/A reflejan `grainSize` (estado plano "sin rango").
+ */
+function refreshGradacion() {
+  const desdeEl = document.getElementById('grad-desde');
+  const hastaEl = document.getElementById('grad-hasta');
+  if (!desdeEl || !hastaEl || !_draft) return;
+  const perf     = _draft.perfilGranulometrico || [];
+  const fallback = _draft.grainSize || 'arena_media';
+  const desde = perf.length >= 1 ? perf[0].tamanoGrano                : fallback;
+  const hasta = perf.length >= 1 ? perf[perf.length - 1].tamanoGrano  : fallback;
+  desdeEl.value = desde;
+  hastaEl.value = hasta;
+  _updateGradHint(desde, hasta);
+}
+
+/**
+ * Aplica el rango elegido. base ≠ techo → guarda el perfil de 2 puntos (forma
+ * afinada, dirección dada por los números). base == techo → "sin rango":
+ * canoniza a perfil ausente (equivalente a un rectángulo plano).
+ */
+function updateGradacion() {
+  if (!_draft) return;
+  const desde = document.getElementById('grad-desde')?.value;
+  const hasta  = document.getElementById('grad-hasta')?.value;
+  if (!desde || !hasta) return;
+  if (desde === hasta) {
+    // base == techo → sin rango. Se asigna `undefined` (NO `delete`): el
+    // preview (buildPreviewUnits) y el guardado (updateUnit) fusionan
+    // {...unit, ..._draft}, así que borrar la clave dejaría el perfil viejo;
+    // `undefined` sí lo sobrescribe y luego JSON.stringify lo omite al guardar.
+    _draft.perfilGranulometrico = undefined;
+  } else {
+    _draft.perfilGranulometrico = [
+      { alturaRelativa: 0, tamanoGrano: desde },
+      { alturaRelativa: 1, tamanoGrano: hasta  },
+    ];
+  }
+  _updateGradHint(desde, hasta);
+  renderColumn(store.getState());
+}
+
+/** "Limpiar" el rango: vuelve al estado plano (perfil ausente). */
+function clearGradacion() {
+  if (!_draft) return;
+  _draft.perfilGranulometrico = undefined; // `undefined`, no `delete` (ver updateGradacion)
+  refreshGradacion();   // los selects vuelven a reflejar grainSize (sin rango)
+  renderColumn(store.getState());
+}
+
+function refreshSecLithos() {
+  const arr = _draft?.secondaryLithologies || [];
+  document.getElementById('tags-sec-litho').innerHTML = arr.map(v =>
+    `<div class="sec-litho-tag">
+       <span>${se(v)}</span>
+       <button onclick="removeSecLitho('${se(v)}')" title="Quitar">✕</button>
+     </div>`
+  ).join('');
+}
+
+// ── Tab switching ────────────────────────────────────────────────
+function switchTab(idx) {
+  document.querySelectorAll('#edit-tabs .tab-btn').forEach((b, i) => b.classList.toggle('active', i === idx));
+  document.querySelectorAll('#edit-body .tab-pane').forEach((p, i) => p.classList.toggle('active', i === idx));
+}
+
+// ── Delete flow ──────────────────────────────────────────────────
+function askDelete(unitId, unitName) {
+  _pendingDeleteId = unitId || _draftId;
+  const name = unitName || (_draft?.code) || _pendingDeleteId;
+  document.getElementById('modal-unit-name').textContent = name;
+  document.getElementById('modal').classList.add('open');
+}
+
+function confirmDelete() {
+  if (_pendingDeleteId) {
+    store.removeUnit(_pendingDeleteId);
+    if (_draftId === _pendingDeleteId) closeEditor();
+  }
+  closeModal();
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+  _pendingDeleteId = null;
+}
+
+// ── Drag & drop ──────────────────────────────────────────────────
+function onDragStart(e, id) {
+  _dragId = id;
+  e.dataTransfer.effectAllowed = 'move';
+  e.currentTarget.classList.add('dragging');
+}
+
+function onDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  document.querySelectorAll('.unit-row.drag-over').forEach(el => el.classList.remove('drag-over'));
+  const row = e.currentTarget;
+  if (row.dataset.id !== _dragId) row.classList.add('drag-over');
+}
+
+function onDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+
+function onDrop(e, _targetId, targetStoreIdx) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  if (!_dragId || _dragId === _targetId) return;
+  store.moveUnit(_dragId, targetStoreIdx);
+  _dragId = null;
+}
+
+function onDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.unit-row.drag-over').forEach(el => el.classList.remove('drag-over'));
+  _dragId = null;
+}
+
+// ── Metadata ─────────────────────────────────────────────────────
+function onMeta() {
+  // topElevation es OPCIONAL — input vacío ⇒ undefined (no 0), para no
+  // inventar una cota de 0 msnm. Al serializar (JSON.stringify), una clave
+  // undefined se descarta, así que "sin cota" ↔ campo ausente, sin ruido.
+  const _optNum = (id) => {
+    const raw = document.getElementById(id).value.trim();
+    return raw === '' || !Number.isFinite(parseFloat(raw)) ? undefined : parseFloat(raw);
+  };
+  const topElevation = _optNum('f-col-top-elev');
+
+  // Ubicación GIS: se MERGEA sobre la location actual (updateMetadata hace
+  // merge SOLO de nivel superior, así que `location` se reemplaza entero —
+  // hay que preservar description/datum/zone/lat/lon que no edita este panel).
+  const curLoc = store.getState().column.metadata.location || { description: '' };
+  const este = _optNum('f-col-este');
+  const norte = _optNum('f-col-norte');
+  const elevation = _optNum('f-col-elev');
+  const coordinates = { ...(curLoc.coordinates || {}), este: este, norte: norte };
+  const location = { ...curLoc, coordinates: coordinates, elevation: elevation };
+
+  store.updateMetadata({
+    name:   document.getElementById('f-col-name').value,
+    scale:  parseInt(document.getElementById('f-col-scale').value) || 500,
+    author: document.getElementById('f-col-author').value,
+    topElevation: topElevation,
+    location: location,
+  });
+}
+
+// ── Close modal on Escape ────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { closeModal(); closeEditor(); closeExportModal(); }
+});
+
+// ── Export ────────────────────────────────────────────────────────
+let _expFmt = 'svg';
+
+const _EXP_NOTES = {
+  svg:  'Imagen vectorial lista para Illustrator, Inkscape o Word.',
+  png:  'Imagen rasterizada a 2× (144 ppp). Ideal para informes Word/Office.',
+  pdf:  'Abre el diálogo de impresión. Elige "Guardar como PDF" en tu navegador.',
+  json: 'Modelo completo con alturas acumuladas (heightFromBase / heightToTop). Compatible con el visor GIS.',
+};
+
+function openExportModal() {
+  const name = store.getState().column.metadata.name || 'columna';
+  const base = name.toLowerCase().replace(/\s+/g,'_').replace(/[^\w-]/g,'');
+  document.getElementById('exp-fname').value = base;
+  setExpFmt('svg');
+  document.getElementById('export-modal').classList.add('open');
+}
+
+function closeExportModal() {
+  document.getElementById('export-modal').classList.remove('open');
+}
+
+function setExpFmt(fmt) {
+  _expFmt = fmt;
+  document.querySelectorAll('.fmt-pill').forEach(p =>
+    p.classList.toggle('on', p.dataset.fmt === fmt)
+  );
+  const exts = { svg:'.svg', png:'.png', pdf:'', json:'.json' };
+  document.getElementById('exp-ext').textContent = exts[fmt];
+  const isPdf = fmt === 'pdf';
+  document.getElementById('exp-fname').style.visibility = isPdf ? 'hidden' : '';
+  document.getElementById('exp-fname-lbl').style.visibility = isPdf ? 'hidden' : '';
+  document.getElementById('exp-note').textContent = _EXP_NOTES[fmt];
+}
+
+function runExport() {
+  const fname = document.getElementById('exp-fname').value.trim() || 'columna';
+  ({ svg: exportSVG, png: exportPNG, pdf: exportPDF, json: exportJSON })[_expFmt](fname);
+  if (_expFmt !== 'pdf') closeExportModal();
+}
+
+function _buildFullSVG() {
+  return renderGrainSizeLogSVG(store.getState(), { geoConfig: GEO_SYMBOLS, iconSize: _gsIconSize });
+}
+
+/**
+ * Reemplaza cada <image href="./icons/Nombre.png"> del SVG por su
+ * equivalente en data URI (imagen convertida a texto autocontenido), para
+ * que el archivo exportado (.svg o .png) funcione solo, sin depender de la
+ * carpeta icons/ estar presente en el destino. Se llama solo al exportar
+ * — el resto de la app sigue usando los archivos sueltos (más liviano).
+ */
+async function _inlineImages(svgString) {
+  const hrefRe = /<image\b[^>]*?\shref="([^"]+)"/g;
+  const hrefs = [...new Set([...svgString.matchAll(hrefRe)].map(m => m[1]).filter(h => !h.startsWith('data:')))];
+  if (hrefs.length === 0) return svgString;
+
+  // Se carga cada ícono vía <img> (gobernado por img-src) y se pasa por un
+  // <canvas> para obtener su data URI, en vez de fetch(): la CSP de
+  // endurecimiento usa `connect-src 'none'` (garantía técnica de cero egreso
+  // de datos), que bloquea fetch()/XHR incluso de archivos LOCALES. Dibujar
+  // la imagen local en un canvas y leer toDataURL() produce el mismo data URI
+  // autocontenido sin abrir ninguna conexión. En Electron bajo file:// el
+  // canvas NO queda "tainted" con estas imágenes locales (verificado), así
+  // que toDataURL() no lanza SecurityError.
+  const toDataUrl = (href) => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width  = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        resolve(canvas.toDataURL('image/png'));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    img.onerror = () => reject(new Error('No se pudo cargar el ícono para incrustar: ' + href));
+    img.src = href;
+  });
+
+  const entries = await Promise.all(hrefs.map(async h => [h, await toDataUrl(h)]));
+  const map = Object.fromEntries(entries);
+  return svgString.replace(hrefRe, (full, href) => map[href] ? full.replace(href, map[href]) : full);
+}
+
+async function exportSVG(fname) {
+  const svg = await _inlineImages(_buildFullSVG());
+  _dlBlob(new Blob([svg], { type: 'image/svg+xml' }), fname + '.svg');
+}
+
+async function exportPNG(fname) {
+  const svg    = await _inlineImages(_buildFullSVG());
+  const svgUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+  const img    = new Image();
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = svgUrl; });
+  URL.revokeObjectURL(svgUrl);
+  const DPR    = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width  = img.naturalWidth  * DPR;
+  canvas.height = img.naturalHeight * DPR;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(DPR, DPR);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, img.naturalWidth, img.naturalHeight);
+  ctx.drawImage(img, 0, 0);
+  const dataUrl = canvas.toDataURL('image/png');
+  Object.assign(document.createElement('a'), { href: dataUrl, download: fname + '.png' }).click();
+  closeExportModal();
+}
+
+function exportPDF() {
+  const m = store.getState().column.metadata;
+  document.getElementById('print-root').innerHTML = `
+    <div class="pr-meta">
+      <div class="pr-title">${se(m.name || 'Columna estratigráfica')}</div>
+      ${m.location?.description ? `<div class="pr-row">Ubicación: ${se(m.location.description)}</div>` : ''}
+      <div class="pr-row">Autor: ${se(m.author || '—')}</div>
+      <div class="pr-row">Escala 1:${se(String(m.scale || 500))}</div>
+      <div class="pr-row">Fecha: ${new Date().toLocaleDateString('es-CL')}</div>
+    </div>
+    <div class="pr-svg">${_buildFullSVG()}</div>`;
+  closeExportModal();
+  setTimeout(() => window.print(), 80);
+}
+
+function exportJSON(fname) {
+  const state    = store.getState();
+  const m        = state.column.metadata;
+  const units    = state.column.units;
+  const computed = store.calcAccumulatedHeights(units);
+
+  const payload = {
+    format:     'columna-estratigrafica-v1',
+    exportedAt: new Date().toISOString(),
+    metadata: {
+      name:     m.name     || '',
+      author:   m.author   || '',
+      scale:    m.scale    || 500,
+      location: m.location || {},
+    },
+    column: {
+      totalThicknessM: computed.length ? computed[computed.length - 1].heightToTop : 0,
+      units: computed.map(u => ({
+        id:                    u.id,
+        code:                  u.code,
+        rank:                  u.rank                  ?? null,
+        thickness:             u.thickness,
+        heightFromBase:        u.heightFromBase,
+        heightToTop:           u.heightToTop,
+        primaryLithology:      u.primaryLithology      || null,
+        secondaryLithology:    u.secondaryLithology     || null,
+        color:                 u.color                 || null,
+        upperContactType:      u.upperContactType      || 'neto',
+        sedimentaryStructures: u.sedimentaryStructures || [],
+        fossilContent:         u.fossilContent         || 'esteril',
+        description:           u.description           || '',
+        age:                   u.age                   || null,
+      })),
+    },
+  };
+
+  _dlBlob(
+    new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
+    fname + '.json'
+  );
+}
+
+function _dlBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  Object.assign(document.createElement('a'), { href: url, download: filename }).click();
+  URL.revokeObjectURL(url);
+}
+
+// ── HTML escape ──────────────────────────────────────────────────
+function se(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+<script src="../projectBridge.js"></script>
+<script src="./columnasProjectAdapter.js"></script>
+</body>
+</html>

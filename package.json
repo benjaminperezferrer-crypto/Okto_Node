@@ -1,0 +1,84 @@
+{
+  "name": "okto-node",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "build:hidrogeo": "esbuild src/hidrogeo/main.tsx --bundle --outfile=src/hidrogeo/bundle.js --loader:.tsx=tsx --loader:.css=text --jsx=automatic",
+    "build:gis": "esbuild src/gis/main.tsx --bundle --outfile=src/gis/bundle.js --loader:.tsx=tsx --loader:.css=text --jsx=automatic",
+    "build:estructural": "esbuild src/estructural/main.tsx --bundle --outfile=src/estructural/bundle.js --loader:.tsx=tsx --loader:.css=text --jsx=automatic",
+    "build:projectBridge": "esbuild src/projectBridge.ts --bundle --outfile=src/projectBridge.js --format=iife --global-name=ProjectBridge",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "electron:start": "electron .",
+    "electron:pack": "electron-builder --win"
+  },
+  "devDependencies": {
+    "@types/geojson": "^7946.0.16",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/shpjs": "^3.4.7",
+    "@types/three": "^0.185.1",
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "^0.28.1",
+    "jsdom": "^29.1.1",
+    "mammoth": "^1.12.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "geotiff": "^3.0.5",
+    "pako": "^3.0.1",
+    "pdfjs-dist": "^6.2.108",
+    "proj4": "^2.20.9",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "shpjs": "^6.2.0",
+    "three": "^0.185.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "build": {
+    "appId": "com.oktonode.app",
+    "productName": "Okto Node",
+    "asar": true,
+    "asarUnpack": [
+      "**/pdf.worker.min.mjs"
+    ],
+    "directories": {
+      "output": "C:\\OktoNode-dist"
+    },
+    "files": [
+      "index.html",
+      "src/**/*",
+      "electron/**/*",
+      "!src/**/*.test.ts",
+      "!src/**/*.test.tsx",
+      "!src/**/*.test.js",
+      "!node_modules/**"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "icon": "electron/icon.ico"
+    },
+    "portable": {
+      "artifactName": "OktoNode-portable.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Okto Node",
+      "artifactName": "OktoNode-Setup.exe",
+      "installerIcon": "electron/icon.ico",
+      "uninstallerIcon": "electron/icon.ico",
+      "uninstallDisplayName": "Okto Node"
+    }
+  }
+}

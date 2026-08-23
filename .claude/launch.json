@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "qaqc-app",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", ".", "-l", "3000"],
+      "port": 3000
+    },
+    {
+      "name": "columnas-viewer",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", ".", "-l", "3001"],
+      "port": 3001
+    },
+    {
+      "name": "hidro-viewer",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", ".", "-l", "3002"],
+      "port": 3002
+    },
+    {
+      "name": "gis-viewer",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", ".", "-l", "3003"],
+      "port": 3003
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+node_modules/
+
+# Local/reference data — not consumed by app code, kept out of history
+Datos/
+SVG/
+USGS_AI_pack/
+Iconos/
+*.pdf
+*.docx
+
+# Generated artifacts — not source
+dist/
+graphify-out/
+
+# Build output (electron-builder / Vite / Forge)
+dist-electron/
+out/
+build/
+release/
+.vite/
+
+# Installers / packaged binaries
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.snap
+*.blockmap
+
+# Env / secrets
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
