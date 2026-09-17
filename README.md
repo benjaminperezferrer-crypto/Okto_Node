@@ -3,4 +3,4 @@ Aplicación de escritorio modular para geología: Módulos de QA/QC de bases de 
 **Stack:** Electron · TypeScript · React
 
 > Software propietario. Todos los derechos reservados.
-> En fase de piloto — no destinado a distribución pública.
+> En fase de piloto — destinado a distribución pública.
